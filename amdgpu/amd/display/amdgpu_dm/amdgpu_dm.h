@@ -51,6 +51,9 @@
 
 #define AMDGPU_DMUB_NOTIFICATION_MAX 5
 
+#define HDMI_AMD_VENDOR_SPECIFIC_DATA_BLOCK_IEEE_REGISTRATION_ID 0x00001A
+#define AMD_VSDB_VERSION_3_FEATURECAP_REPLAYMODE 0x40
+#define HDMI_AMD_VENDOR_SPECIFIC_DATA_BLOCK_VERSION_3 0x3
 /*
 #include "include/amdgpu_dal_power_if.h"
 #include "amdgpu_dm_irq.h"
@@ -74,6 +77,12 @@ struct amdgpu_bo;
 struct dmub_srv;
 struct dc_plane_state;
 struct dmub_notification;
+
+struct amd_vsdb_block {
+	unsigned char ieee_id[3];
+	unsigned char version;
+	unsigned char feature_caps;
+};
 
 struct common_irq_params {
 	struct amdgpu_device *adev;
@@ -167,31 +176,6 @@ struct amdgpu_dm_backlight_caps {
 };
 
 /**
- * for_each_oldnew_plane_in_state_reverse - iterate over all planes in an atomic
- * update in reverse order
- * @__state: &struct drm_atomic_state pointer
- * @plane: &struct drm_plane iteration cursor
- * @old_plane_state: &struct drm_plane_state iteration cursor for the old state
- * @new_plane_state: &struct drm_plane_state iteration cursor for the new state
- * @__i: int iteration cursor, for macro-internal use
- *
- * This iterates over all planes in an atomic update in reverse order,
- * tracking both old and  new state. This is useful in places where the
- * state delta needs to be considered, for example in atomic check functions.
- */
-#if !defined(for_each_oldnew_plane_in_state_reverse) && \
-	defined(for_each_oldnew_plane_in_state)
-#define for_each_oldnew_plane_in_state_reverse(__state, plane, old_plane_state, new_plane_state, __i) \
-	for ((__i) = ((__state)->dev->mode_config.num_total_plane - 1);	\
-	     (__i) >= 0;						\
-	     (__i)--)							\
-		for_each_if ((__state)->planes[__i].ptr &&		\
-			     ((plane) = (__state)->planes[__i].ptr,	\
-			      (old_plane_state) = (__state)->planes[__i].old_state,\
-			      (new_plane_state) = (__state)->planes[__i].new_state, 1))
-#endif
-
-/**
  * struct dal_allocation - Tracks mapped FB memory for SMU communication
  * @list: list of dal allocations
  * @bo: GPU buffer object
@@ -204,7 +188,6 @@ struct dal_allocation {
 	void *cpu_ptr;
 	u64 gpu_addr;
 };
-
 
 /**
  * struct hpd_rx_irq_offload_work_queue - Work queue to handle hpd_rx_irq
@@ -224,6 +207,11 @@ struct hpd_rx_irq_offload_work_queue {
 	 * we're handling link loss
 	 */
 	bool is_handling_link_loss;
+	/**
+	 * @is_handling_mst_msg_rdy_event: Used to prevent inserting mst message
+	 * ready event when we're already handling mst message ready event
+	 */
+	bool is_handling_mst_msg_rdy_event;
 	/**
 	 * @aconnector: The aconnector that this work queue is attached to
 	 */
@@ -369,7 +357,6 @@ struct amdgpu_display_manager {
 	struct drm_device *ddev;
 	u16 display_indexes_num;
 
-#ifdef HAVE_DRM_ATOMIC_PRIVATE_OBJ_INIT
 	/**
 	 * @atomic_obj:
 	 *
@@ -379,8 +366,6 @@ struct amdgpu_display_manager {
 	 */
 	struct drm_private_obj atomic_obj;
 
-#endif
-
 	/**
 	 * @dc_lock:
 	 *
@@ -389,7 +374,6 @@ struct amdgpu_display_manager {
 	 */
 	struct mutex dc_lock;
 
-#if defined(HAVE_DRM_DRM_AUDIO_COMPONENT_H)
 	/**
 	 * @audio_lock:
 	 *
@@ -411,7 +395,6 @@ struct amdgpu_display_manager {
 	 * successfully, false otherwise.
 	 */
 	bool audio_registered;
-#endif
 
 	/**
 	 * @vblank_lock:
@@ -503,9 +486,7 @@ struct amdgpu_display_manager {
 	struct amdgpu_dm_backlight_caps backlight_caps[AMDGPU_DM_MAX_NUM_EDP];
 
 	struct mod_freesync *freesync_module;
-#ifdef CONFIG_DRM_AMD_DC_HDCP
 	struct hdcp_workqueue *hdcp_workqueue;
-#endif
 
 	/**
 	 * @vblank_control_workqueue:
@@ -648,12 +629,18 @@ struct amdgpu_hdmi_vsdb_info {
 	 * @max_refresh_rate_hz: FreeSync Maximum Refresh Rate in Hz
 	 */
 	unsigned int max_refresh_rate_hz;
+
+	/**
+	 * @replay_mode: Replay supported
+	 */
+	bool replay_mode;
 };
 
 struct amdgpu_dm_connector {
 
 	struct drm_connector base;
 	uint32_t connector_id;
+	int bl_idx;
 
 	/* we need to mind the EDID between detect
 	   and get modes due to analog/digital/tvencoder */
@@ -681,6 +668,8 @@ struct amdgpu_dm_connector {
 	struct drm_dp_mst_port *mst_output_port;
 	struct amdgpu_dm_connector *mst_root;
 	struct drm_dp_aux *dsc_aux;
+	struct mutex handle_mst_msg_ready;
+
 	/* TODO see if we can merge with ddc_bus or make a dm_connector */
 	struct amdgpu_i2c_adapter *i2c;
 
@@ -698,19 +687,12 @@ struct amdgpu_dm_connector {
 	int max_vfreq ;
 	int pixel_clock_mhz;
 
-#if defined(HAVE_DRM_DRM_AUDIO_COMPONENT_H)
 	/* Audio instance - protected by audio_lock. */
 	int audio_inst;
-#endif
 
 	struct mutex hpd_lock;
 
 	bool fake_enable;
-
-#ifdef CONFIG_DEBUG_FS
-	uint32_t debugfs_dpcd_address;
-	uint32_t debugfs_dpcd_size;
-#endif
 	bool force_yuv420_output;
 	struct dsc_preferred_settings dsc_settings;
 	union dp_downstream_port_present mst_downstream_port_present;
@@ -764,10 +746,6 @@ struct dm_crtc_state {
 
 	int crc_skip_count;
 
-#ifndef HAVE_DRM_VRR_SUPPORTED
-	bool base_vrr_enabled;
-#endif
-
 	bool freesync_vrr_info_changed;
 
 	bool dsc_force_changed;
@@ -781,11 +759,7 @@ struct dm_crtc_state {
 #define to_dm_crtc_state(x) container_of(x, struct dm_crtc_state, base)
 
 struct dm_atomic_state {
-#ifdef HAVE_DRM_ATOMIC_PRIVATE_OBJ_INIT
 	struct drm_private_state base;
-#else
-	struct drm_atomic_state base;
-#endif
 
 	struct dc_state *context;
 };
@@ -798,15 +772,10 @@ struct dm_connector_state {
 	enum amdgpu_rmx_type scaling;
 	uint8_t underscan_vborder;
 	uint8_t underscan_hborder;
-#ifndef HAVE_DRM_CONNECTOR_PROPERTY_MAX_BPC
-	uint8_t max_bpc;
-#endif
 	bool underscan_enable;
 	bool freesync_enable;
 	bool freesync_capable;
-#ifdef CONFIG_DRM_AMD_DC_HDCP
 	bool update_hdcp;
-#endif
 	uint8_t abm_level;
 #if defined(HAVE_DRM_CONNECTOR_HELPER_FUNCS_ATOMIC_CHECK_ARG_DRM_ATOMIC_STATE)
 	int vcpi_slots;
@@ -870,8 +839,6 @@ int amdgpu_dm_process_dmub_aux_transfer_sync(struct dc_context *ctx, unsigned in
 int amdgpu_dm_process_dmub_set_config_sync(struct dc_context *ctx, unsigned int link_index,
 					struct set_config_cmd_payload *payload, enum set_config_status *operation_result);
 
-bool check_seamless_boot_capability(struct amdgpu_device *adev);
-
 struct dc_stream_state *
 	create_validate_stream_for_sink(struct amdgpu_dm_connector *aconnector,
 					const struct drm_display_mode *drm_mode,
@@ -881,14 +848,9 @@ struct dc_stream_state *
 int dm_atomic_get_state(struct drm_atomic_state *state,
 			struct dm_atomic_state **dm_state);
 
-struct amdgpu_dm_connector *
+struct drm_connector *
 amdgpu_dm_find_first_crtc_matching_connector(struct drm_atomic_state *state,
-#ifndef for_each_new_connector_in_state
-					     struct drm_crtc *crtc,
-					     bool from_state_var);
-#else
 					     struct drm_crtc *crtc);
-#endif
 
 int convert_dc_color_depth_into_bpc(enum dc_color_depth display_color_depth);
 #endif /* __AMDGPU_DM_H__ */

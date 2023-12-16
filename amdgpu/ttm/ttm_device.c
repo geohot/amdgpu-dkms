@@ -28,10 +28,10 @@
 #include <linux/mm.h>
 #include <linux/debugfs.h>
 
+#include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_device.h>
 #include <drm/ttm/ttm_tt.h>
 #include <drm/ttm/ttm_placement.h>
-#include <drm/ttm/ttm_bo_api.h>
 
 #include "ttm_module.h"
 
@@ -59,7 +59,13 @@ static void ttm_global_release(void)
 		goto out;
 
 	ttm_pool_mgr_fini();
-	debugfs_remove(ttm_debugfs_root);
+
+	/*
+	 * Replace the debugfs_remove() with debugfs_remove_recursive() for dkms code.
+	 * debugfs_remove() can't remove the ttm/ directory in legacy kernel.
+	 * So use the debugfs_remove_recursive() here.
+	*/
+	debugfs_remove_recursive(ttm_debugfs_root);
 
 	__free_page(glob->dummy_read_page);
 	memset(glob, 0, sizeof(*glob));
@@ -71,6 +77,9 @@ static int ttm_global_init(void)
 {
 	struct ttm_global *glob = &ttm_glob;
 	unsigned long num_pages, num_dma32;
+#if IS_ENABLED(CONFIG_X86)
+	struct cpuinfo_x86 *c = &cpu_data(0);
+#endif
 	struct sysinfo si;
 	int ret = 0;
 
@@ -89,7 +98,17 @@ static int ttm_global_init(void)
 	 * system memory.
 	 */
 	num_pages = ((u64)si.totalram * si.mem_unit) >> PAGE_SHIFT;
+#if IS_ENABLED(CONFIG_X86)
+	/* For GFX 9.4.3 APU, set mem limit to be 3/4th of
+	 * system memory.
+	 */
+	if (c->x86 == 0x19 && c->x86_model == 0x90)
+		num_pages = (num_pages * 3) / 4;
+	else
+		num_pages /= 2;
+#else
 	num_pages /= 2;
+#endif
 
 	/* But for DMA32 we limit ourself to only use 2GiB maximum. */
 	num_dma32 = (u64)(si.totalram - si.totalhigh) * si.mem_unit
@@ -141,7 +160,6 @@ int ttm_global_swapout(struct ttm_operation_ctx *ctx, gfp_t gfp_flags)
 	mutex_unlock(&ttm_global_mutex);
 	return ret;
 }
-EXPORT_SYMBOL(ttm_global_swapout);
 
 int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 		       gfp_t gfp_flags)
@@ -162,7 +180,7 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 			struct ttm_buffer_object *bo = res->bo;
 			uint32_t num_pages;
 
-			if (!bo)
+			if (!bo || bo->resource != res)
 				continue;
 
 			num_pages = PFN_UP(bo->base.size);
@@ -178,16 +196,6 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
 	return 0;
 }
 EXPORT_SYMBOL(ttm_device_swapout);
-
-static void ttm_device_delayed_workqueue(struct work_struct *work)
-{
-	struct ttm_device *bdev =
-		container_of(work, struct ttm_device, wq.work);
-
-	if (!ttm_bo_delayed_delete(bdev, false))
-		schedule_delayed_work(&bdev->wq,
-				      ((HZ / 100) < 1) ? 1 : HZ / 100);
-}
 
 /**
  * ttm_device_init
@@ -219,15 +227,19 @@ int ttm_device_init(struct ttm_device *bdev, struct ttm_device_funcs *funcs,
 	if (ret)
 		return ret;
 
+	bdev->wq = alloc_workqueue("ttm", WQ_MEM_RECLAIM | WQ_HIGHPRI, 16);
+	if (!bdev->wq) {
+		ttm_global_release();
+		return -ENOMEM;
+	}
+
 	bdev->funcs = funcs;
 
 	ttm_sys_man_init(bdev);
-	ttm_pool_init(&bdev->pool, dev, use_dma_alloc, use_dma32);
+	ttm_pool_init(&bdev->pool, dev, NUMA_NO_NODE, use_dma_alloc, use_dma32);
 
 	bdev->vma_manager = vma_manager;
-	INIT_DELAYED_WORK(&bdev->wq, ttm_device_delayed_workqueue);
 	spin_lock_init(&bdev->lru_lock);
-	INIT_LIST_HEAD(&bdev->ddestroy);
 	INIT_LIST_HEAD(&bdev->pinned);
 	bdev->dev_mapping = mapping;
 	mutex_lock(&ttm_global_mutex);
@@ -251,10 +263,8 @@ void ttm_device_fini(struct ttm_device *bdev)
 	list_del(&bdev->device_list);
 	mutex_unlock(&ttm_global_mutex);
 
-	cancel_delayed_work_sync(&bdev->wq);
-
-	if (ttm_bo_delayed_delete(bdev, true))
-		pr_debug("Delayed destroy list was clean\n");
+	drain_workqueue(bdev->wq);
+	destroy_workqueue(bdev->wq);
 
 	spin_lock(&bdev->lru_lock);
 	for (i = 0; i < TTM_MAX_BO_PRIORITY; ++i)

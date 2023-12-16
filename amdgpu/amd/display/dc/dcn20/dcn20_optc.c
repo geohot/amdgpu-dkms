@@ -38,8 +38,12 @@
 	optc1->tg_shift->field_name, optc1->tg_mask->field_name
 
 /**
- * Enable CRTC
- * Enable CRTC - call ASIC Control Object to enable Timing generator.
+ * optc2_enable_crtc() - Enable CRTC - call ASIC Control Object to enable Timing generator.
+ *
+ * @optc: timing_generator instance.
+ *
+ * Return: If CRTC is enabled, return true.
+ *
  */
 bool optc2_enable_crtc(struct timing_generator *optc)
 {
@@ -73,15 +77,18 @@ bool optc2_enable_crtc(struct timing_generator *optc)
 }
 
 /**
- *For the below, I'm not sure how your GSL parameters are stored in your env,
- * so I will assume a gsl_params struct for now
+ * optc2_set_gsl() - Assign OTG to GSL groups,
+ *                   set one of the OTGs to be master & rest are slaves
+ *
+ * @optc: timing_generator instance.
+ * @params: pointer to gsl_params
  */
 void optc2_set_gsl(struct timing_generator *optc,
 		   const struct gsl_params *params)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
-/**
+/*
  * There are (MAX_OPTC+1)/2 gsl groups available for use.
  * In each group (assign an OTG to a group by setting OTG_GSLX_EN = 1,
  * set one of the OTGs to be the master (OTG_GSL_MASTER_EN = 1) and the rest are slaves.
@@ -117,7 +124,6 @@ void optc2_set_gsl_source_select(
 	}
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 /* Set DSC-related configuration.
  *   dsc_mode: 0 disables DSC, other values enable DSC in specified format
  *   sc_bytes_per_pixel: Bytes per pixel in u3.28 format
@@ -139,7 +145,6 @@ void optc2_set_dsc_config(struct timing_generator *optc,
 	REG_UPDATE(OPTC_WIDTH_CONTROL,
 		OPTC_DSC_SLICE_WIDTH, dsc_slice_width);
 }
-#endif
 
 /* Get DSC-related configuration.
  *   dsc_mode: 0 disables DSC, other values enable DSC in specified format
@@ -393,10 +398,9 @@ void optc2_triplebuffer_lock(struct timing_generator *optc)
 	REG_SET(OTG_MASTER_UPDATE_LOCK, 0,
 		OTG_MASTER_UPDATE_LOCK, 1);
 
-	if (optc->ctx->dce_environment != DCE_ENV_FPGA_MAXIMUS)
-		REG_WAIT(OTG_MASTER_UPDATE_LOCK,
-				UPDATE_LOCK_STATUS, 1,
-				1, 10);
+	REG_WAIT(OTG_MASTER_UPDATE_LOCK,
+			UPDATE_LOCK_STATUS, 1,
+			1, 10);
 }
 
 void optc2_triplebuffer_unlock(struct timing_generator *optc)
@@ -458,6 +462,16 @@ void optc2_setup_manual_trigger(struct timing_generator *optc)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
+	/* Set the min/max selectors unconditionally so that
+	 * DMCUB fw may change OTG timings when necessary
+	 * TODO: Remove the w/a after fixing the issue in DMCUB firmware
+	 */
+	REG_UPDATE_4(OTG_V_TOTAL_CONTROL,
+				 OTG_V_TOTAL_MIN_SEL, 1,
+				 OTG_V_TOTAL_MAX_SEL, 1,
+				 OTG_FORCE_LOCK_ON_EVENT, 0,
+				 OTG_SET_V_TOTAL_MIN_MASK, (1 << 1)); /* TRIGA */
+
 	REG_SET_8(OTG_TRIGA_CNTL, 0,
 			OTG_TRIGA_SOURCE_SELECT, 21,
 			OTG_TRIGA_SOURCE_PIPE_SELECT, optc->inst,
@@ -482,14 +496,9 @@ bool optc2_configure_crc(struct timing_generator *optc,
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	REG_SET_2(OTG_CRC_CNTL2, 0,
 			OTG_CRC_DSC_MODE, params->dsc_mode,
 			OTG_CRC_DATA_STREAM_COMBINE_MODE, params->odm_mode);
-#else
-	REG_SET(OTG_CRC_CNTL2, 0,
-			OTG_CRC_DATA_STREAM_COMBINE_MODE, params->odm_mode);
-#endif
 
 	return optc1_configure_crc(optc, params);
 }
@@ -548,9 +557,7 @@ static struct timing_generator_funcs dcn20_tg_funcs = {
 		.setup_global_swap_lock = NULL,
 		.get_crc = optc1_get_crc,
 		.configure_crc = optc2_configure_crc,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 		.set_dsc_config = optc2_set_dsc_config,
-#endif
 		.get_dsc_status = optc2_get_dsc_status,
 		.set_dwb_source = optc2_set_dwb_source,
 		.set_odm_bypass = optc2_set_odm_bypass,

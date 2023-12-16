@@ -42,7 +42,8 @@
 #include <linux/module.h>
 #include <linux/debugfs.h>
 #include <drm/drm_cache.h>
-#include <drm/ttm/ttm_bo_driver.h>
+#include <drm/ttm/ttm_bo.h>
+#include <drm/ttm/ttm_tt.h>
 
 #include "ttm_module.h"
 
@@ -188,14 +189,11 @@ int ttm_sg_tt_init(struct ttm_tt *ttm, struct ttm_buffer_object *bo,
 
 	ttm_tt_init_fields(ttm, bo, page_flags, caching, 0);
 
-#ifndef HAVE_TTM_SG_TT_INIT
-	ret = ttm_dma_tt_alloc_page_directory(ttm);
-#else
 	if (page_flags & TTM_TT_FLAG_EXTERNAL)
 		ret = ttm_sg_tt_alloc_page_directory(ttm);
 	else
 		ret = ttm_dma_tt_alloc_page_directory(ttm);
-#endif
+
 	if (ret) {
 		pr_err("Failed allocating page table\n");
 		return -ENOMEM;
@@ -459,3 +457,9 @@ ttm_kmap_iter_tt_init(struct ttm_kmap_iter_tt *iter_tt,
 	return &iter_tt->base;
 }
 EXPORT_SYMBOL(ttm_kmap_iter_tt_init);
+
+unsigned long ttm_tt_pages_limit(void)
+{
+	return ttm_pages_limit;
+}
+EXPORT_SYMBOL(ttm_tt_pages_limit);

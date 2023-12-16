@@ -711,8 +711,8 @@ void amdgpu_hmm_unregister(struct amdgpu_bo *bo)
 }
 
 #else /* HAVE_AMDKCL_HMM_MIRROR_ENABLED */
-#define MAX_WALK_BYTE	(2UL << 30)
 
+#define MAX_WALK_BYTE   (2UL << 30)
 /**
  * amdgpu_hmm_invalidate_gfx - callback to notify about mm change
  *
@@ -875,24 +875,23 @@ int amdgpu_hmm_range_get_pages(struct mmu_interval_notifier *notifier,
 		pr_debug("hmm range: start = 0x%lx, end = 0x%lx",
 			hmm_range->start, hmm_range->end);
 
-		/* Assuming 512MB takes maxmium 1 second to fault page address */
-		timeout = max((hmm_range->end - hmm_range->start) >> 29, 1UL);
+		/* Assuming 128MB takes maximum 1 second to fault page address */
+		timeout = max((hmm_range->end - hmm_range->start) >> 27, 1UL);
 		timeout *= HMM_RANGE_DEFAULT_TIMEOUT;
 		timeout = jiffies + msecs_to_jiffies(timeout);
 
 retry:
 		hmm_range->notifier_seq = mmu_interval_read_begin(notifier);
 		r = hmm_range_fault(hmm_range);
-
 #ifndef HAVE_HMM_DROP_CUSTOMIZABLE_PFN_FORMAT
 		if (unlikely(r <= 0)) {
 #else
 		if (unlikely(r)) {
 #endif
 			/*
-		 	* FIXME: This timeout should encompass the retry from
-		 	* mmu_interval_read_retry() as well.
-		 	*/
+			 * FIXME: This timeout should encompass the retry from
+			 * mmu_interval_read_retry() as well.
+			 */
 #ifndef HAVE_HMM_DROP_CUSTOMIZABLE_PFN_FORMAT
 			if ((r == 0 || r == -EBUSY) && !time_after(jiffies, timeout))
 #else

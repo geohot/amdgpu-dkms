@@ -79,7 +79,7 @@ static void program_sh_mem_settings_v11(struct amdgpu_device *adev, uint32_t vmi
 					uint32_t sh_mem_config,
 					uint32_t sh_mem_ape1_base,
 					uint32_t sh_mem_ape1_limit,
-					uint32_t sh_mem_bases)
+					uint32_t sh_mem_bases, uint32_t inst)
 {
 	lock_srbm(adev, 0, 0, 0, vmid);
 
@@ -90,7 +90,7 @@ static void program_sh_mem_settings_v11(struct amdgpu_device *adev, uint32_t vmi
 }
 
 static int set_pasid_vmid_mapping_v11(struct amdgpu_device *adev, unsigned int pasid,
-					unsigned int vmid)
+					unsigned int vmid, uint32_t inst)
 {
 	uint32_t value = pasid << IH_VMID_0_LUT__PASID__SHIFT;
 
@@ -102,7 +102,8 @@ static int set_pasid_vmid_mapping_v11(struct amdgpu_device *adev, unsigned int p
 	return 0;
 }
 
-static int init_interrupts_v11(struct amdgpu_device *adev, uint32_t pipe_id)
+static int init_interrupts_v11(struct amdgpu_device *adev, uint32_t pipe_id,
+				uint32_t inst)
 {
 	uint32_t mec;
 	uint32_t pipe;
@@ -163,7 +164,7 @@ static inline struct v11_sdma_mqd *get_sdma_mqd(void *mqd)
 static int hqd_load_v11(struct amdgpu_device *adev, void *mqd, uint32_t pipe_id,
 			uint32_t queue_id, uint32_t __user *wptr,
 			uint32_t wptr_shift, uint32_t wptr_mask,
-			struct mm_struct *mm)
+			struct mm_struct *mm, uint32_t inst)
 {
 	struct v11_compute_mqd *m;
 	uint32_t *mqd_hqd;
@@ -259,9 +260,9 @@ static int hqd_load_v11(struct amdgpu_device *adev, void *mqd, uint32_t pipe_id,
 
 static int hiq_mqd_load_v11(struct amdgpu_device *adev, void *mqd,
 			      uint32_t pipe_id, uint32_t queue_id,
-			      uint32_t doorbell_off)
+			      uint32_t doorbell_off, uint32_t inst)
 {
-	struct amdgpu_ring *kiq_ring = &adev->gfx.kiq.ring;
+	struct amdgpu_ring *kiq_ring = &adev->gfx.kiq[0].ring;
 	struct v11_compute_mqd *m;
 	uint32_t mec, pipe;
 	int r;
@@ -276,7 +277,7 @@ static int hiq_mqd_load_v11(struct amdgpu_device *adev, void *mqd,
 	pr_debug("kfd: set HIQ, mec:%d, pipe:%d, queue:%d.\n",
 		 mec, pipe, queue_id);
 
-	spin_lock(&adev->gfx.kiq.ring_lock);
+	spin_lock(&adev->gfx.kiq[0].ring_lock);
 	r = amdgpu_ring_alloc(kiq_ring, 7);
 	if (r) {
 		pr_err("Failed to alloc KIQ (%d).\n", r);
@@ -303,7 +304,7 @@ static int hiq_mqd_load_v11(struct amdgpu_device *adev, void *mqd,
 	amdgpu_ring_commit(kiq_ring);
 
 out_unlock:
-	spin_unlock(&adev->gfx.kiq.ring_lock);
+	spin_unlock(&adev->gfx.kiq[0].ring_lock);
 	release_queue(adev);
 
 	return r;
@@ -311,7 +312,7 @@ out_unlock:
 
 static int hqd_dump_v11(struct amdgpu_device *adev,
 			uint32_t pipe_id, uint32_t queue_id,
-			uint32_t (**dump)[2], uint32_t *n_regs)
+			uint32_t (**dump)[2], uint32_t *n_regs, uint32_t inst)
 {
 	uint32_t i = 0, reg;
 #define HQD_N_REGS 56
@@ -446,7 +447,7 @@ static int hqd_sdma_dump_v11(struct amdgpu_device *adev,
 }
 
 static bool hqd_is_occupied_v11(struct amdgpu_device *adev, uint64_t queue_address,
-				uint32_t pipe_id, uint32_t queue_id)
+				uint32_t pipe_id, uint32_t queue_id, uint32_t inst)
 {
 	uint32_t act;
 	bool retval = false;
@@ -487,7 +488,7 @@ static bool hqd_sdma_is_occupied_v11(struct amdgpu_device *adev, void *mqd)
 static int hqd_destroy_v11(struct amdgpu_device *adev, void *mqd,
 				enum kfd_preempt_type reset_type,
 				unsigned int utimeout, uint32_t pipe_id,
-				uint32_t queue_id)
+				uint32_t queue_id, uint32_t inst)
 {
 	enum hqd_dequeue_request_type type;
 	unsigned long end_jiffies;
@@ -572,7 +573,7 @@ static int hqd_sdma_destroy_v11(struct amdgpu_device *adev, void *mqd,
 
 static int wave_control_execute_v11(struct amdgpu_device *adev,
 					uint32_t gfx_index_val,
-					uint32_t sq_cmd)
+					uint32_t sq_cmd, uint32_t inst)
 {
 	uint32_t data = 0;
 
@@ -607,7 +608,15 @@ static void set_vm_context_page_table_base_v11(struct amdgpu_device *adev,
 	adev->gfxhub.funcs->setup_vm_pt_regs(adev, vmid, page_table_base);
 }
 
-/* returns TRAP_EN, EXCP_EN and EXCP_RPLACE. */
+/*
+ * Returns TRAP_EN, EXCP_EN and EXCP_REPLACE.
+ *
+ * restore_dbg_registers is ignored here but is a general interface requirement
+ * for devices that support GFXOFF and where the RLC save/restore list
+ * does not support hw registers for debugging i.e. the driver has to manually
+ * initialize the debug mode registers after it has disabled GFX off during the
+ * debug session.
+ */
 static uint32_t kgd_gfx_v11_enable_debug_trap(struct amdgpu_device *adev,
 					    bool restore_dbg_registers,
 					    uint32_t vmid)
@@ -621,14 +630,14 @@ static uint32_t kgd_gfx_v11_enable_debug_trap(struct amdgpu_device *adev,
 	return data;
 }
 
-/* returns TRAP_EN, EXCP_EN and EXCP_RPLACE. */
+/* Returns TRAP_EN, EXCP_EN and EXCP_REPLACE. */
 static uint32_t kgd_gfx_v11_disable_debug_trap(struct amdgpu_device *adev,
 						bool keep_trap_enabled,
 						uint32_t vmid)
 {
 	uint32_t data = 0;
 
-	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, keep_trap_enabled);
+	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, 1);
 	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, EXCP_EN, 0);
 	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, EXCP_REPLACE, 0);
 
@@ -649,6 +658,10 @@ static int kgd_gfx_v11_validate_trap_override_request(struct amdgpu_device *adev
 				KFD_DBG_TRAP_MASK_DBG_ADDRESS_WATCH |
 				KFD_DBG_TRAP_MASK_DBG_MEMORY_VIOLATION;
 
+	if (amdgpu_ip_version(adev, GC_HWIP, 0) >= IP_VERSION(11, 0, 4))
+		*trap_mask_supported |= KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_START |
+					KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_END;
+
 	if (trap_override != KFD_DBG_TRAP_OVERRIDE_OR &&
 			trap_override != KFD_DBG_TRAP_OVERRIDE_REPLACE)
 		return -EPERM;
@@ -656,7 +669,42 @@ static int kgd_gfx_v11_validate_trap_override_request(struct amdgpu_device *adev
 	return 0;
 }
 
-/* returns TRAP_EN, EXCP_EN and EXCP_RPLACE. */
+static uint32_t trap_mask_map_sw_to_hw(uint32_t mask)
+{
+	uint32_t trap_on_start = (mask & KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_START) ? 1 : 0;
+	uint32_t trap_on_end = (mask & KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_END) ? 1 : 0;
+	uint32_t excp_en = mask & (KFD_DBG_TRAP_MASK_FP_INVALID |
+			KFD_DBG_TRAP_MASK_FP_INPUT_DENORMAL |
+			KFD_DBG_TRAP_MASK_FP_DIVIDE_BY_ZERO |
+			KFD_DBG_TRAP_MASK_FP_OVERFLOW |
+			KFD_DBG_TRAP_MASK_FP_UNDERFLOW |
+			KFD_DBG_TRAP_MASK_FP_INEXACT |
+			KFD_DBG_TRAP_MASK_INT_DIVIDE_BY_ZERO |
+			KFD_DBG_TRAP_MASK_DBG_ADDRESS_WATCH |
+			KFD_DBG_TRAP_MASK_DBG_MEMORY_VIOLATION);
+	uint32_t ret;
+
+	ret = REG_SET_FIELD(0, SPI_GDBG_PER_VMID_CNTL, EXCP_EN, excp_en);
+	ret = REG_SET_FIELD(ret, SPI_GDBG_PER_VMID_CNTL, TRAP_ON_START, trap_on_start);
+	ret = REG_SET_FIELD(ret, SPI_GDBG_PER_VMID_CNTL, TRAP_ON_END, trap_on_end);
+
+	return ret;
+}
+
+static uint32_t trap_mask_map_hw_to_sw(uint32_t mask)
+{
+	uint32_t ret = REG_GET_FIELD(mask, SPI_GDBG_PER_VMID_CNTL, EXCP_EN);
+
+	if (REG_GET_FIELD(mask, SPI_GDBG_PER_VMID_CNTL, TRAP_ON_START))
+		ret |= KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_START;
+
+	if (REG_GET_FIELD(mask, SPI_GDBG_PER_VMID_CNTL, TRAP_ON_END))
+		ret |= KFD_DBG_TRAP_MASK_TRAP_ON_WAVE_END;
+
+	return ret;
+}
+
+/* Returns TRAP_EN, EXCP_EN and EXCP_REPLACE. */
 static uint32_t kgd_gfx_v11_set_wave_launch_trap_override(struct amdgpu_device *adev,
 					uint32_t vmid,
 					uint32_t trap_override,
@@ -664,35 +712,27 @@ static uint32_t kgd_gfx_v11_set_wave_launch_trap_override(struct amdgpu_device *
 					uint32_t trap_mask_request,
 					uint32_t *trap_mask_prev,
 					uint32_t kfd_dbg_trap_cntl_prev)
-
 {
 	uint32_t data = 0;
 
-	*trap_mask_prev = REG_GET_FIELD(kfd_dbg_trap_cntl_prev, SPI_GDBG_PER_VMID_CNTL, EXCP_EN);
-	trap_mask_bits = (trap_mask_bits & trap_mask_request) |
-		(*trap_mask_prev & ~trap_mask_request);
+	*trap_mask_prev = trap_mask_map_hw_to_sw(kfd_dbg_trap_cntl_prev);
+
+	data = (trap_mask_bits & trap_mask_request) | (*trap_mask_prev & ~trap_mask_request);
+	data = trap_mask_map_sw_to_hw(data);
 
 	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, TRAP_EN, 1);
-	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, EXCP_EN, trap_mask_bits);
 	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, EXCP_REPLACE, trap_override);
 
 	return data;
 }
 
-/* returns STALL_VMID or LAUNCH_MODE. */
 static uint32_t kgd_gfx_v11_set_wave_launch_mode(struct amdgpu_device *adev,
 					uint8_t wave_launch_mode,
 					uint32_t vmid)
 {
 	uint32_t data = 0;
-	bool is_stall_mode = wave_launch_mode == 4;
 
-	if (is_stall_mode)
-		data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, STALL_VMID,
-									1);
-	else
-		data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, LAUNCH_MODE,
-							wave_launch_mode);
+	data = REG_SET_FIELD(data, SPI_GDBG_PER_VMID_CNTL, LAUNCH_MODE, wave_launch_mode);
 
 	return data;
 }
@@ -703,7 +743,8 @@ static uint32_t kgd_gfx_v11_set_address_watch(struct amdgpu_device *adev,
 					uint32_t watch_address_mask,
 					uint32_t watch_id,
 					uint32_t watch_mode,
-					uint32_t debug_vmid)
+					uint32_t debug_vmid,
+					uint32_t inst)
 {
 	uint32_t watch_address_high;
 	uint32_t watch_address_low;
@@ -739,8 +780,8 @@ static uint32_t kgd_gfx_v11_set_address_watch(struct amdgpu_device *adev,
 	return watch_address_cntl;
 }
 
-uint32_t kgd_gfx_v11_clear_address_watch(struct amdgpu_device *adev,
-					uint32_t watch_id)
+static uint32_t kgd_gfx_v11_clear_address_watch(struct amdgpu_device *adev,
+						uint32_t watch_id)
 {
 	return 0;
 }
@@ -767,5 +808,5 @@ const struct kfd2kgd_calls gfx_v11_kfd2kgd = {
 	.set_wave_launch_trap_override = kgd_gfx_v11_set_wave_launch_trap_override,
 	.set_wave_launch_mode = kgd_gfx_v11_set_wave_launch_mode,
 	.set_address_watch = kgd_gfx_v11_set_address_watch,
-	.clear_address_watch = kgd_gfx_v11_clear_address_watch,
+	.clear_address_watch = kgd_gfx_v11_clear_address_watch
 };

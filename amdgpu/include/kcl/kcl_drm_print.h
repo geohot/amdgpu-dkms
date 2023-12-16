@@ -29,86 +29,6 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_device.h>
 
-#if !defined(HAVE_DRM_DRM_PRINT_H)
-/* Copied from d8187177b0b1 include/drm/drm_print.h */
-struct drm_printer {
-	void (*printfn)(struct drm_printer *p, struct va_format *vaf);
-	void *arg;
-	const char *prefix;
-};
-
-void drm_printf(struct drm_printer *p, const char *f, ...);
-void __drm_printfn_seq_file(struct drm_printer *p, struct va_format *vaf);
-static inline struct drm_printer drm_seq_file_printer(struct seq_file *f)
-{
-	struct drm_printer p = {
-		.printfn = __drm_printfn_seq_file,
-		.arg = f,
-	};
-	return p;
-}
-#endif
-
-#ifndef HAVE_DRM_COREDUMP_PRINTER
-void __drm_printfn_coredump(struct drm_printer *p, struct va_format *vaf);
-void __drm_puts_coredump(struct drm_printer *p, const char *str);
-
-/**
- * struct drm_print_iterator - local struct used with drm_printer_coredump
- * @data: Pointer to the devcoredump output buffer
- * @start: The offset within the buffer to start writing
- * @remain: The number of bytes to write for this iteration
- */
-struct drm_print_iterator {
-	void *data;
-	ssize_t start;
-	ssize_t remain;
-	/* private: */
-	ssize_t offset;
-};
-
-static inline struct drm_printer
-drm_coredump_printer(struct drm_print_iterator *iter)
-{
-	struct drm_printer p = {
-		.printfn = __drm_printfn_coredump,
-		.arg = iter,
-	};
-
-	/* Set the internal offset of the iterator to zero */
-	iter->offset = 0;
-
-	return p;
-}
-
-#endif
-
-/* Copied from 3d387d923c18 include/drm/drm_print.h */
-#if !defined(HAVE_DRM_PRINTER_PREFIX)
-extern void __drm_printfn_debug(struct drm_printer *p, struct va_format *vaf);
-
-static inline struct drm_printer drm_debug_printer(const char *prefix)
-{
-	struct drm_printer p = {
-		.printfn = __drm_printfn_debug,
-#ifndef HAVE_DRM_DRM_PRINT_H
-		.prefix = prefix
-#endif
-	};
-	return p;
-}
-
-static inline
-void drm_mm_print(const struct drm_mm *mm, struct drm_printer *p)
-{
-#ifndef HAVE_DRM_DRM_PRINT_H
-	drm_mm_debug_table((struct drm_mm *)mm, p->prefix);
-#else
-	drm_mm_debug_table((struct drm_mm *)mm, "no prefix");
-#endif
-}
-#endif
-
 #ifndef _DRM_PRINTK
 #define _DRM_PRINTK(once, level, fmt, ...)				\
 	do {								\
@@ -159,6 +79,16 @@ void kcl_drm_err(const char *format, ...);
 #define HAVE_DRM_ERR_MACRO
 #endif /* drm_err */
 
+#ifndef drm_warn
+#define drm_warn(drm, fmt, ...)		\
+	dev_warn((drm)->dev, "[drm] " fmt, ##__VA_ARGS__)
+#endif /* drm_warn */
+
+#ifndef drm_warn_once
+#define drm_warn_once(drm, fmt, ...) \
+	dev_warn_once((drm)->dev, "[drm] " fmt, ##__VA_ARGS__)
+#endif /* drm_warn_once */
+
 #if !defined(DRM_UT_VBL)
 #define DRM_UT_VBL		0x20
 #endif
@@ -205,6 +135,11 @@ void kcl_drm_err(const char *format, ...);
 #if !defined(drm_dbg_kms)
 #define drm_dbg_kms(drm, fmt, ...)				\
 	drm_dev_dbg((drm)->dev, 0x04, fmt, ##__VA_ARGS__)
+#endif
+
+#if !defined(drm_dbg_dp)
+#define drm_dbg_dp(drm, fmt, ...)					\
+	drm_dev_dbg((drm) ? (drm)->dev : NULL, DRM_UT_DP, fmt, ##__VA_ARGS__)
 #endif
 
 #ifndef HAVE_DRM_DEBUG_ENABLED

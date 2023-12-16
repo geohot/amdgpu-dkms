@@ -6,9 +6,7 @@
 #include <linux/kernel.h>
 #include <kcl/kcl_moduleparam.h>
 #include <kcl/kcl_types.h>
-#include <kcl/kcl_overflow.h>
 #include <kcl/kcl_idr.h>
-#include <kcl/kcl_kref.h>
 #include <kcl/kcl_kernel.h>
 #include <kcl/kcl_compiler_attributes.h>
 #include <kcl/kcl_dma_mapping.h>
@@ -16,7 +14,6 @@
 #include <kcl/kcl_iosys-map.h>
 #include <kcl/kcl_eventpoll.h>
 #include <kcl/kcl_i2c.h>
-#include <kcl/kcl_firmware.h>
 #include <kcl/kcl_video.h>
 #include <kcl/kcl_acpi.h>
 #include <kcl/kcl_workqueue.h>
@@ -27,7 +24,6 @@
 #include <kcl/kcl_list.h>
 #include <kcl/backport/kcl_io_backport.h>
 #include <kcl/backport/kcl_uaccess_backport.h>
-#include <kcl/backport/kcl_perf_event_backport.h>
 #include <kcl/kcl_seq_file.h>
 #include <kcl/kcl_seqlock.h>
 #include <kcl/kcl_mmu_notifier.h>
@@ -38,7 +34,6 @@
 #include <kcl/backport/kcl_mm_backport.h>
 #include <kcl/kcl_pagemap.h>
 #include <kcl/kcl_pm.h>
-#include <kcl/kcl_nospec.h>
 #include <kcl/backport/kcl_fence_backport.h>
 #include <kcl/backport/kcl_device_cgroup_backport.h>
 #include <kcl/backport/kcl_hmm.h>
@@ -50,27 +45,18 @@
 #include <kcl/backport/kcl_drm_cache_backport.h>
 #include <kcl/kcl_task_barrier.h>
 #include <kcl/backport/kcl_drm_print.h>
-#include <kcl/kcl_drm_auth.h>
-#include <kcl/backport/kcl_drm_crtc.h>
-#include <kcl/backport/kcl_drm_plane.h>
 #include <kcl/backport/kcl_drm_backport.h>
-#include <kcl/backport/kcl_drm_fourcc.h>
 #include <kcl/backport/kcl_drm_gem.h>
 #include <kcl/backport/kcl_drm_prime.h>
-#include <kcl/backport/kcl_drm_drv.h>
-#include <kcl/backport/kcl_drm_syncobj.h>
 #include <kcl/backport/kcl_drm_vma_manager_backport.h>
 #include <kcl/backport/kcl_drm_fb.h>
 #include <kcl/backport/kcl_drm_drv.h>
 #include <kcl/kcl_drm_modes.h>
-#include <kcl/backport/kcl_drm_encoder.h>
 #include <kcl/kcl_drm_connector.h>
 #include <kcl/backport/kcl_drm_dp_helper_backport.h>
 #include <kcl/backport/kcl_drm_dp_mst_helper_backport.h>
 #include <kcl/backport/kcl_drm_atomic_helper_backport.h>
-#include <kcl/kcl_drm_atomic.h>
 #include <kcl/kcl_drm_hdcp.h>
-#include <kcl/kcl_ftrace.h>
 #include <kcl/kcl_moduleparam.h>
 #include <kcl/kcl_drm_prime.h>
 #include <kcl/kcl_acpi_table.h>
@@ -78,16 +64,13 @@
 #include <kcl/kcl_debugfs_inode.h>
 #include <kcl/kcl_sysfs_emit.h>
 #include <kcl/kcl_bitops.h>
-#include <kcl/backport/kcl_drm_mm_backport.h>
 #include <kcl/kcl_sched_mm.h>
 #include <kcl/backport/kcl_numa_backport.h>
 #include "kcl/kcl_amdgpu_drm_fb_helper.h"
-#include "kcl/kcl_amdgpu_drm_gem_framebuffer_helper.h"
 #include "kcl/kcl_amdgpu.h"
 #include "kcl/kcl_amdgpu_drm_drv.h"
 #include "kcl/kcl_amdgpu_drm_gem.h"
 #include "kcl/kcl_drm_gem_ttm_helper.h"
-#include "kcl/kcl_amdgpu_drm_modeset_helper.h"
 #include "kcl/kcl_mce.h"
 #include "kcl/kcl_drm_aperture.h"
 #include <kcl/kcl_intel_family.h>
@@ -118,4 +101,18 @@
  * include drm_damage_helper.h to fix the missing function declaration for legacy kernel.
  */
 #include <drm/drm_damage_helper.h>
+#include <kcl/backport/kcl_drm_probe_helper.h>
+#include <kcl/kcl_rbtree.h>
+#include <kcl/kcl_delay.h>
+#include <kcl/kcl_apple-gmux.h>
+#include <kcl/backport/kcl_drm_edid.h>
+#include <kcl/kcl_debugfs.h>
+#include <kcl/kcl_irqdesc.h>
+#include <kcl/kcl_pci_ids.h>
+#include <kcl/kcl_drm_suballoc.h>
+#include <kcl/kcl_drm_edid.h>
+#include <kcl/kcl_build_bug.h>
+#include <kcl/kcl_drm_dp.h>
+#include <kcl/kcl_drm_writeback.h>
+#include <kcl/kcl_class.h>
 #endif /* AMDGPU_BACKPORT_H */

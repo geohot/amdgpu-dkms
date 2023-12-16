@@ -12,6 +12,7 @@
 #include <linux/mm_types.h>
 #include <linux/mm.h>
 #include <linux/gfp.h>
+#include <linux/swap.h>
 #include <linux/slab.h>
 #include <kcl/kcl_mmap_lock.h>
 #include <kcl/kcl_mm_types.h>
@@ -22,12 +23,12 @@
 #define untagged_addr(addr) (addr)
 #endif
 
-#ifndef HAVE_MM_ACCESS
-extern struct mm_struct * (*_kcl_mm_access)(struct task_struct *task, unsigned int mode);
-#endif
-
 #ifndef HAVE_MMPUT_ASYNC
 extern void (*_kcl_mmput_async)(struct mm_struct *mm);
+#endif
+
+#ifndef HAVE_ZONE_DEVICE_PAGE_INIT
+void zone_device_page_init(struct page *page);
 #endif
 
 #ifndef HAVE_FAULT_FLAG_ALLOW_RETRY_FIRST
@@ -35,62 +36,6 @@ static inline bool fault_flag_allow_retry_first(unsigned int flags)
 {
 	return (flags & FAULT_FLAG_ALLOW_RETRY) &&
 	    (!(flags & FAULT_FLAG_TRIED));
-}
-#endif
-
-#ifndef HAVE_KVFREE
-/* Copied from mm/util.c */
-static inline void kvfree(const void *addr)
-{
-	if (is_vmalloc_addr(addr))
-		vfree(addr);
-	else
-		kfree(addr);
-}
-#endif
-
-#ifndef HAVE_KVZALLOC_KVMALLOC
-/* Copied from v4.11-10655-ga7c3e901a46f ipc/util.c */
-static inline void *kvmalloc(size_t size, gfp_t flags)
-{
-	void *out;
-
-	if (size > PAGE_SIZE)
-		out = __vmalloc(size, flags, PAGE_KERNEL);
-	else
-		out = kmalloc(size, flags);
-	return out;
-}
-static inline void *kvzalloc(size_t size, gfp_t flags)
-{
-	return kvmalloc(size, flags | __GFP_ZERO);
-}
-#endif /* HAVE_KVZALLOC_KVMALLOC */
-
-#ifndef HAVE_KVMALLOC_ARRAY
-/* Copied from v4.11-10661-g752ade68cbd8 include/linux/mm.h */
-static inline void *kvmalloc_array(size_t n, size_t size, gfp_t flags)
-{
-	if (size != 0 && n > SIZE_MAX / size)
-		return NULL;
-
-	return kvmalloc(n * size, flags);
-}
-#endif /* HAVE_KVMALLOC_ARRAY */
-
-#ifndef HAVE_KVCALLOC
-/* Copied from v4.17-10379-g1c542f38ab8d include/linux/mm.h */
-static inline void *kvcalloc(size_t n, size_t size, gfp_t flags)
-{
-	return kvmalloc_array(n, size, flags | __GFP_ZERO);
-}
-#endif /* HAVE_KVCALLOC */
-
-#if !defined(HAVE_MMGRAB)
-/* Copied from v4.10-10392-gf1f1007644ff include/linux/sched.h */
-static inline void mmgrab(struct mm_struct *mm)
-{
-	atomic_inc(&mm->mm_count);
 }
 #endif
 
@@ -126,14 +71,6 @@ static inline bool is_cow_mapping(vm_flags_t flags)
 }
 #endif /* HAVE_IS_COW_MAPPING */
 
-#ifndef HAVE_MMGET
-/* Copied fromr include/linux/sched.h */
-static inline void mmget(struct mm_struct *mm)
-{
-        atomic_inc(&mm->mm_users);
-}
-#endif /*HAVE_MMGET */
-
 #ifndef HAVE_VMA_LOOKUP
 /**
  * vma_lookup() - Find a VMA at a specific address
@@ -153,5 +90,52 @@ struct vm_area_struct *vma_lookup(struct mm_struct *mm, unsigned long addr)
         return vma;
 }
 #endif /* HAVE_VMA_LOOKUP */
+
+#ifndef VM_ACCESS_FLAGS
+/* Copied from v5.6-12367-g6cb4d9a2870d mm/vma: introduce VM_ACCESS_FLAGS*/
+/* VMA basic access permission flags */
+#define VM_ACCESS_FLAGS (VM_READ | VM_WRITE | VM_EXEC)
+#endif
+
+#ifndef page_to_virt
+#define page_to_virt(x) __va(PFN_PHYS(page_to_pfn(x)))
+#endif
+
+#ifndef HAVE_VM_FLAGS_SET
+static inline void vm_flags_set(struct vm_area_struct *vma,
+                                vm_flags_t flags)
+{
+#ifdef HAVE_MMAP_ASSERT_WRITE_LOCKED
+        mmap_assert_write_locked(vma->vm_mm);
+#endif
+        vma->vm_flags |= flags;
+}
+
+static inline void vm_flags_clear(struct vm_area_struct *vma,
+                                  vm_flags_t flags)
+{
+#ifdef HAVE_MMAP_ASSERT_WRITE_LOCKED
+        mmap_assert_write_locked(vma->vm_mm);
+#endif
+        vma->vm_flags &= ~flags;
+}
+#endif
+
+#ifndef HAVE_WANT_INIT_ON_FREE
+static inline bool want_init_on_free(void)
+{
+	pr_warn_once("legacy kernel without want_init_on_free()\n");
+	return false;
+}
+#endif
+
+#ifndef HAVE_TOTALRAM_PAGES
+extern unsigned long totalram_pages;
+static inline unsigned long _kcl_totalram_pages(void)
+{
+       return totalram_pages;
+}
+#define totalram_pages _kcl_totalram_pages
+#endif /* HAVE_TOTALRAM_PAGES */
 
 #endif /* AMDKCL_MM_H */

@@ -115,9 +115,7 @@ void decide_8b_10b_training_settings(
 	lt_settings->pattern_for_cr = decide_cr_training_pattern(link_setting);
 	lt_settings->pattern_for_eq = decide_eq_training_pattern(link, link_setting);
 	lt_settings->enhanced_framing = 1;
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	lt_settings->should_set_fec_ready = true;
-#endif
 	lt_settings->disallow_per_lane_settings = true;
 	lt_settings->always_match_dpcd_with_hw_lane_settings = true;
 	lt_settings->lttpr_mode = dp_decide_8b_10b_lttpr_mode(link);
@@ -227,8 +225,10 @@ enum link_training_result perform_8b_10b_clock_recovery_sequence(
 				offset);
 
 		/* 5. check CR done*/
-		if (dp_is_cr_done(lane_count, dpcd_lane_status))
+		if (dp_is_cr_done(lane_count, dpcd_lane_status)) {
+			DC_LOG_HW_LINK_TRAINING("%s: Clock recovery OK\n", __func__);
 			return LINK_TRAINING_SUCCESS;
+		}
 
 		/* 6. max VS reached*/
 		if ((link_dp_get_encoding_format(&lt_settings->link_settings) ==
@@ -388,6 +388,8 @@ enum link_training_result dp_perform_8b_10b_link_training(
 					link_res,
 					lt_settings,
 					repeater_id);
+			if (status == LINK_TRAINING_SUCCESS)
+				DC_LOG_HW_LINK_TRAINING("%s: Channel EQ done.\n", __func__);
 
 			repeater_training_done(link, repeater_id);
 
@@ -409,6 +411,8 @@ enum link_training_result dp_perform_8b_10b_link_training(
 					link_res,
 					lt_settings,
 					DPRX);
+			if (status == LINK_TRAINING_SUCCESS)
+				DC_LOG_HW_LINK_TRAINING("%s: Channel EQ done.\n", __func__);
 		}
 	}
 

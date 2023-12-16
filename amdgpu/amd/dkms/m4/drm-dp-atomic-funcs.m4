@@ -5,13 +5,7 @@ dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_ATOMIC_FIND_VCPI_SLOTS], [
 	AC_KERNEL_DO_BACKGROUND([
 		AC_KERNEL_TRY_COMPILE([
-			#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-			#include <drm/display/drm_dp_mst_helper.h>
-			#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-			#include <drm/dp/drm_dp_mst_helper.h>
-			#else
 			#include <drm/drm_dp_mst_helper.h>
-			#endif
 		], [
 			int retval;
 			retval = drm_dp_atomic_find_vcpi_slots(NULL, NULL, NULL, 0, 0);
@@ -30,13 +24,7 @@ dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_ATOMIC_RELEASE_VCPI_SLOTS], [
         AC_KERNEL_DO_BACKGROUND([
                 AC_KERNEL_TRY_COMPILE([
-                        #if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-                        #include <drm/display/drm_dp_mst_helper.h>
-                        #elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-                        #include <drm/dp/drm_dp_mst_helper.h>
-                        #else
-                        #include <drm/drm_dp_mst_helper.h>
-                        #endif
+                    #include <drm/drm_dp_mst_helper.h>
                 ],[
                         int ret;
                         ret = drm_dp_atomic_release_time_slots(NULL, NULL, NULL);
@@ -49,20 +37,14 @@ AC_DEFUN([AC_AMDGPU_DRM_DP_ATOMIC_RELEASE_VCPI_SLOTS], [
 		dnl # drm/dp_mst: Start tracking per-port VCPI allocations
 		dnl #
 		        AC_KERNEL_TRY_COMPILE([
-				#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-				#include <drm/display/drm_dp_mst_helper.h>
-				#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-				#include <drm/dp/drm_dp_mst_helper.h>
-				#else
 				#include <drm/drm_dp_mst_helper.h>
-				#endif
 			],[
 				int ret;
-				struct drm_dp_mst_port *port;
+				struct drm_dp_mst_port *port = NULL;
 				ret = drm_dp_atomic_release_vcpi_slots(NULL, NULL, port);
 			],[
 				AC_DEFINE(HAVE_DRM_DP_ATOMIC_RELEASE_VCPI_SLOTS_MST_PORT, 1,
-					[drm_dp_atomic_release_vcpi_slots() with drm_dp_mst_port argument is available])	
+					[drm_dp_atomic_release_vcpi_slots() with drm_dp_mst_port argument is available])
 			])
 		])
         ])
@@ -76,13 +58,7 @@ dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_ATOMIC_FIND_TIME_SLOTS], [
 	AC_KERNEL_DO_BACKGROUND([
 		AC_KERNEL_TRY_COMPILE([
-			#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-			#include <drm/display/drm_dp_mst_helper.h>
-			#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-			#include <drm/dp/drm_dp_mst_helper.h>
-			#else
 			#include <drm/drm_dp_mst_helper.h>
-			#endif
 		],[
 			int ret;
 			ret = drm_dp_atomic_find_time_slots(NULL, NULL, NULL, 0);
@@ -122,8 +98,7 @@ AC_DEFUN([AC_AMDGPU_DRM_DP_ATOMIC_WAIT_FOR_DEPENDENCIES], [
 		AC_KERNEL_TRY_COMPILE([
 			#include <drm/drm_dp_mst_helper.h>
 		],[
-			int ret;
-			ret = drm_dp_mst_atomic_wait_for_dependencies(NULL);
+			drm_dp_mst_atomic_wait_for_dependencies(NULL);
 		],[
 			AC_DEFINE(HAVE_DRM_DP_ATOMIC_WAIT_FOR_DEPENDENCIES, 1,
 				[drm_dp_mst_atomic_wait_for_dependencies() is available])

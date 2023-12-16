@@ -35,8 +35,6 @@
 #include <drm/drm_edid.h>
 #include <drm/drm_encoder.h>
 #include <drm/drm_fixed.h>
-#include <drm/drm_crtc_helper.h>
-#include <drm/drm_fb_helper.h>
 #include <drm/drm_framebuffer.h>
 #include <drm/drm_probe_helper.h>
 #include <linux/i2c.h>
@@ -232,11 +230,6 @@ struct amdgpu_i2c_chan {
 	struct mutex mutex;
 };
 
-
-#ifndef AMDKCL_DRM_FBDEV_GENERIC
-struct amdgpu_fbdev;
-#endif
-
 struct amdgpu_afmt {
 	bool enabled;
 	int offset;
@@ -306,9 +299,6 @@ struct amdgpu_display_funcs {
 
 struct amdgpu_framebuffer {
 	struct drm_framebuffer base;
-#ifndef HAVE_DRM_DRM_GEM_FRAMEBUFFER_HELPER_H
-	struct drm_gem_object *obj;
-#endif
 
 	uint64_t tiling_flags;
 	bool tmz_surface;
@@ -316,15 +306,6 @@ struct amdgpu_framebuffer {
 	/* caching for later use */
 	uint64_t address;
 };
-
-#ifndef AMDKCL_DRM_FBDEV_GENERIC
-struct amdgpu_fbdev {
-	struct drm_fb_helper helper;
-	struct amdgpu_framebuffer rfb;
-	struct list_head fbdev_list;
-	struct amdgpu_device *adev;
-};
-#endif
 
 struct amdgpu_mode_info {
 	struct atom_context *atom_context;
@@ -345,30 +326,16 @@ struct amdgpu_mode_info {
 	struct drm_property *audio_property;
 	/* FMT dithering */
 	struct drm_property *dither_property;
-#ifndef HAVE_DRM_CONNECTOR_PROPERTY_MAX_BPC
-	/* maximum number of bits per channel for monitor color */
-	struct drm_property *max_bpc_property;
-#endif
 	/* Adaptive Backlight Modulation (power feature) */
 	struct drm_property *abm_level_property;
 	/* it is used to allow enablement of freesync mode */
 	struct drm_property *freesync_property;
 	/* it is used to know about display capability of freesync mode */
 	struct drm_property *freesync_capable_property;
-#ifndef HAVE_DRM_VRR_SUPPORTED
-	/* Support for upstream vrr_capable connector property */
-	struct drm_property *vrr_capable_property;
-	/* Support for upstream vrr_enabled CRTC property */
-	struct drm_property *vrr_enabled_property;
-#endif
 	/* hardcoded DFP edid from BIOS */
 	struct edid *bios_hardcoded_edid;
 	int bios_hardcoded_edid_size;
 
-#ifndef AMDKCL_DRM_FBDEV_GENERIC
-	/* pointer to fbdev info structure */
-	struct amdgpu_fbdev *rfbdev;
-#endif
 	/* firmware flags */
 	u32 firmware_flags;
 	/* pointer to backlight encoder */
@@ -382,9 +349,6 @@ struct amdgpu_mode_info {
 	int			disp_priority;
 	const struct amdgpu_display_funcs *funcs;
 	const enum drm_plane_type *plane_type;
-#ifndef HAVE_DRM_MODE_CONFIG_HELPER_SUSPEND
-	struct drm_atomic_state *suspend_state;
-#endif
 };
 
 #define AMDGPU_MAX_BL_LEVEL 0xFF
@@ -457,9 +421,6 @@ struct amdgpu_crtc {
 	enum amdgpu_interrupt_state vsync_timer_enabled;
 
 	int otg_inst;
-#if !defined(HAVE_STRUCT_DRM_CRTC_STATE_FLIP_FLAG)
-	uint32_t flip_flags;
-#endif
 	struct drm_pending_vblank_event *event;
 };
 
@@ -653,43 +614,18 @@ bool amdgpu_crtc_get_scanout_position(struct drm_crtc *crtc,
 			int *hpos, ktime_t *stime, ktime_t *etime,
 			const struct drm_display_mode *mode);
 
-#ifndef AMDKCL_DRM_FBDEV_GENERIC
-/* fbdev layer */
-int amdgpu_fbdev_init(struct amdgpu_device *adev);
-void amdgpu_fbdev_fini(struct amdgpu_device *adev);
-void amdgpu_fbdev_set_suspend(struct amdgpu_device *adev, int state);
-int amdgpu_fbdev_total_size(struct amdgpu_device *adev);
-bool amdgpu_fbdev_robj_is_fb(struct amdgpu_device *adev, struct amdgpu_bo *robj);
-
-int amdgpu_align_pitch(struct amdgpu_device *adev, int width, int bpp, bool tiled);
-#endif
 
 /* amdgpu_display.c */
 void amdgpu_display_print_display_setup(struct drm_device *dev);
 int amdgpu_display_modeset_create_props(struct amdgpu_device *adev);
-#ifdef HAVE_STRUCT_DRM_CRTC_FUNCS_SET_CONFIG_CTX
 int amdgpu_display_crtc_set_config(struct drm_mode_set *set,
 				   struct drm_modeset_acquire_ctx *ctx);
-#else
-int amdgpu_display_crtc_set_config(struct drm_mode_set *set);
-#endif
 
-#ifdef HAVE_STRUCT_DRM_CRTC_FUNCS_PAGE_FLIP_TARGET
 int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
 				struct drm_framebuffer *fb,
 				struct drm_pending_vblank_event *event,
-#ifdef HAVE_STRUCT_DRM_CRTC_FUNCS_PAGE_FLIP_TARGET_CTX
 				uint32_t page_flip_flags, uint32_t target,
 				struct drm_modeset_acquire_ctx *ctx);
-#else
-				uint32_t page_flip_flags, uint32_t target);
-#endif
-#else
-int amdgpu_crtc_page_flip(struct drm_crtc *crtc,
-			  struct drm_framebuffer *fb,
-			  struct drm_pending_vblank_event *event,
-			  uint32_t page_flip_flags);
-#endif
 
 extern const struct drm_mode_config_funcs amdgpu_mode_funcs;
 

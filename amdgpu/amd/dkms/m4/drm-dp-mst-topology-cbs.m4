@@ -4,13 +4,7 @@ dnl # drm/dp-mst-helper: Remove hotplug callback
 dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_HOTPLUG], [
 	AC_KERNEL_TRY_COMPILE([
-		#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-		#include <drm/display/drm_dp_mst_helper.h>
-		#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-		#include <drm/dp/drm_dp_mst_helper.h>
-		#else
 		#include <drm/drm_dp_mst_helper.h>
-		#endif
 	], [
 		struct drm_dp_mst_topology_cbs *dp_mst_cbs = NULL;
 		dp_mst_cbs->hotplug(NULL);
@@ -30,13 +24,7 @@ dnl # drm/dp/mst: split connector registration into two parts (v2)
 dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_REGISTER_CONNECTOR], [
 	AC_KERNEL_TRY_COMPILE([
-		#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-		#include <drm/display/drm_dp_mst_helper.h>
-		#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-		#include <drm/dp/drm_dp_mst_helper.h>
-		#else
 		#include <drm/drm_dp_mst_helper.h>
-		#endif
 	], [
 		struct drm_dp_mst_topology_cbs *dp_mst_cbs = NULL;
 		dp_mst_cbs->register_connector(NULL);
@@ -52,13 +40,7 @@ dnl # drm/dp_mst: Remove drm_dp_mst_topology_cbs.destroy_connector
 dnl #
 AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_DESTROY_CONNECTOR], [
 	AC_KERNEL_TRY_COMPILE([
-		#if defined(HAVE_DRM_DISPLAY_DRM_DP_MST_HELPER_H)
-		#include <drm/display/drm_dp_mst_helper.h>
-		#elif defined(HAVE_DRM_DP_DRM_DP_MST_HELPER_H)
-		#include <drm/dp/drm_dp_mst_helper.h>
-		#else
 		#include <drm/drm_dp_mst_helper.h>
-		#endif
 	], [
 		struct drm_dp_mst_topology_cbs *dp_mst_cbs = NULL;
 		dp_mst_cbs->destroy_connector(NULL, NULL);
@@ -68,10 +50,27 @@ AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_DESTROY_CONNECTOR], [
 	])
 ])
 
+dnl #
+dnl # commit v5.7-rc1-646-g471bdd0df0d5
+dnl # drm/i915/dp_mst: Work around out-of-spec adapters filtering short pulses
+dnl #
+AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_POLL_HPD_IRQ], [
+	AC_KERNEL_TRY_COMPILE([
+		#include <drm/drm_dp_mst_helper.h>
+	], [
+		struct drm_dp_mst_topology_cbs *dp_mst_cbs = NULL;
+		dp_mst_cbs->poll_hpd_irq(NULL);
+	], [
+		AC_DEFINE(HAVE_DRM_DP_MST_TOPOLOGY_CBS_POLL_HPD_IRQ, 1,
+			[struct drm_dp_mst_topology_cbs->poll_hpd_irq is available])
+	])
+])
+
 AC_DEFUN([AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS], [
 	AC_KERNEL_DO_BACKGROUND([
 		AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_HOTPLUG
 		AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_REGISTER_CONNECTOR
 		AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_DESTROY_CONNECTOR
+		AC_AMDGPU_DRM_DP_MST_TOPOLOGY_CBS_POLL_HPD_IRQ
 	])
 ])

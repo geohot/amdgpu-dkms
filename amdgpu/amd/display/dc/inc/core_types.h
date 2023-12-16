@@ -37,6 +37,8 @@
 #include "dwb.h"
 #include "mcif_wb.h"
 #include "panel_cntl.h"
+#include "dmub/inc/dmub_cmd.h"
+#include "pg_cntl.h"
 
 #define MAX_CLOCK_SOURCES 7
 #define MAX_SVP_PHANTOM_STREAMS 2
@@ -51,9 +53,7 @@ void enable_surface_flip_reporting(struct dc_plane_state *plane_state,
 #include "clock_source.h"
 #include "audio.h"
 #include "dm_pp_smu.h"
-#ifdef CONFIG_DRM_AMD_DC_HDCP
 #include "dm_cp_psp.h"
-#endif
 #include "link_hwss.h"
 
 /********** DAL Core*********************/
@@ -66,6 +66,7 @@ struct resource_context;
 struct clk_bw_params;
 
 struct resource_funcs {
+	enum engine_id (*get_preferred_eng_id_dpia)(unsigned int dpia_index);
 	void (*destroy)(struct resource_pool **pool);
 	void (*link_init)(struct dc_link *link);
 	struct panel_cntl*(*panel_cntl_create)(
@@ -126,39 +127,25 @@ struct resource_funcs {
 		struct dc *dc,
 		struct dc_state *context);
 
-	/*
-	 * Acquires a free pipe for the head pipe.
-	 * The head pipe is first pipe in the current context that matches the stream
-	 *  and does not have a top pipe or prev_odm_pipe.
-	 */
-	struct pipe_ctx *(*acquire_idle_pipe_for_layer)(
-			struct dc_state *context,
+	struct pipe_ctx *(*acquire_free_pipe_as_secondary_dpp_pipe)(
+			const struct dc_state *cur_ctx,
+			struct dc_state *new_ctx,
 			const struct resource_pool *pool,
-			struct dc_stream_state *stream);
+			const struct pipe_ctx *opp_head_pipe);
 
-	/*
-	 * Acquires a free pipe for the head pipe with some additional checks for odm.
-	 * The head pipe is passed in as an argument unlike acquire_idle_pipe_for_layer
-	 *  where it is read from the context.  So this allows us look for different
-	 *  idle_pipe if the head_pipes are different ( ex. in odm 2:1 when we have
-	 *  a left and right pipe ).
-	 *
-	 * It also checks the old context to see if:
-	 *
-	 * 1. a pipe has already been allocated for the head pipe.  If so, it will
-	 *  try to select that pipe as the idle pipe if it is available in the current
-	 *  context.
-	 * 2. if the head_pipe is on the left, it will check if the right pipe has
-	 *  a pipe already allocated.  If so, it will not use that pipe if it is
-	 *  selected as the idle pipe.
-	 */
-	struct pipe_ctx *(*acquire_idle_pipe_for_head_pipe_in_layer)(
-			struct dc_state *context,
+	struct pipe_ctx *(*acquire_free_pipe_as_secondary_opp_head)(
+			const struct dc_state *cur_ctx,
+			struct dc_state *new_ctx,
 			const struct resource_pool *pool,
-			struct dc_stream_state *stream,
-			struct pipe_ctx *head_pipe);
+			const struct pipe_ctx *otg_master);
 
-	enum dc_status (*validate_plane)(const struct dc_plane_state *plane_state, struct dc_caps *caps);
+	void (*release_pipe)(struct dc_state *context,
+			struct pipe_ctx *pipe,
+			const struct resource_pool *pool);
+
+	enum dc_status (*validate_plane)(
+			const struct dc_plane_state *plane_state,
+			struct dc_caps *caps);
 
 	enum dc_status (*add_stream_to_ctx)(
 			struct dc *dc,
@@ -201,11 +188,9 @@ struct resource_funcs {
 			const struct resource_pool *pool,
 			struct dc_3dlut **lut,
 			struct dc_transfer_func **shaper);
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	enum dc_status (*add_dsc_to_stream_resource)(
 			struct dc *dc, struct dc_state *state,
 			struct dc_stream_state *stream);
-#endif
 
 	void (*add_phantom_pipes)(
             struct dc *dc,
@@ -254,9 +239,7 @@ struct resource_pool {
 		unsigned int gsl_2:1;
 	} gsl_groups;
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	struct display_stream_compressor *dscs[MAX_PIPES];
-#endif
 
 	unsigned int pipe_count;
 	unsigned int underlay_pipe_index;
@@ -302,11 +285,14 @@ struct resource_pool {
 	struct audio_support audio_support;
 
 	struct dccg *dccg;
+	struct pg_cntl *pg_cntl;
 	struct irq_service *irqs;
 
 	struct abm *abm;
 	struct dmcu *dmcu;
 	struct dmub_psr *psr;
+
+	struct dmub_replay *replay;
 
 	struct abm *multiple_abms[MAX_PIPES];
 
@@ -319,6 +305,16 @@ struct resource_pool {
 struct dcn_fe_bandwidth {
 	int dppclk_khz;
 
+};
+
+/* Parameters needed to call set_disp_pattern_generator */
+struct test_pattern_params {
+	enum controller_dp_test_pattern test_pattern;
+	enum controller_dp_color_space color_space;
+	enum dc_color_depth color_depth;
+	int width;
+	int height;
+	int offset;
 };
 
 struct stream_resource {
@@ -337,6 +333,8 @@ struct stream_resource {
 	 * otherwise it's using group number 'gsl_group-1'
 	 */
 	uint8_t gsl_group;
+
+	struct test_pattern_params test_pattern_params;
 };
 
 struct plane_resource {
@@ -379,6 +377,8 @@ union pipe_update_flags {
 		uint32_t viewport : 1;
 		uint32_t plane_changed : 1;
 		uint32_t det_size : 1;
+		uint32_t unbounded_req : 1;
+		uint32_t test_pattern_changed : 1;
 	} bits;
 	uint32_t raw;
 };
@@ -431,6 +431,10 @@ struct pipe_ctx {
 	struct dwbc *dwbc;
 	struct mcif_wb *mcif_wb;
 	union pipe_update_flags update_flags;
+	struct tg_color visual_confirm_color;
+	bool has_vactive_margin;
+	/* subvp_index: only valid if the pipe is a SUBVP_MAIN*/
+	uint8_t subvp_index;
 };
 
 /* Data used for dynamic link encoder assignment.
@@ -499,6 +503,12 @@ union bw_output {
 struct bw_context {
 	union bw_output bw;
 	struct display_mode_lib dml;
+	struct dml2_context *dml2;
+};
+
+struct dc_dmub_cmd {
+	union dmub_rb_cmd dmub_cmd;
+	enum dm_dmub_wait_type wait_type;
 };
 
 /**
@@ -549,6 +559,11 @@ struct dc_state {
 	 */
 	struct bw_context bw_ctx;
 
+	struct block_sequence block_sequence[50];
+	unsigned int block_sequence_steps;
+	struct dc_dmub_cmd dc_dmub_cmd[10];
+	unsigned int dmub_cmd_count;
+
 	/**
 	 * @refcount: refcount reference
 	 *
@@ -561,6 +576,34 @@ struct dc_state {
 	struct {
 		unsigned int stutter_period_us;
 	} perf_params;
+
+	struct {
+		/* used to temporarily backup plane states of a stream during
+		 * dc update. The reason is that plane states are overwritten
+		 * with surface updates in dc update. Once they are overwritten
+		 * current state is no longer valid. We want to temporarily
+		 * store current value in plane states so we can still recover
+		 * a valid current state during dc update.
+		 */
+		struct dc_plane_state plane_states[MAX_SURFACE_NUM];
+	} scratch;
+};
+
+struct replay_context {
+	/* ddc line */
+	enum channel_id aux_inst;
+	/* Transmitter id */
+	enum transmitter digbe_inst;
+	/* Engine Id is used for Dig Be source select */
+	enum engine_id digfe_inst;
+	/* Controller Id used for Dig Fe source select */
+	enum controller_id controllerId;
+	unsigned int line_time_in_ns;
+};
+
+enum dc_replay_enable {
+	DC_REPLAY_DISABLE			= 0,
+	DC_REPLAY_ENABLE			= 1,
 };
 
 struct dc_bounding_box_max_clk {

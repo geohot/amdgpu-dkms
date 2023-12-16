@@ -342,17 +342,18 @@ void optc3_program_blank_color(struct timing_generator *optc,
 void optc3_set_vtotal_change_limit(struct timing_generator *optc,
 		uint32_t limit);
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 void optc3_set_dsc_config(struct timing_generator *optc,
 		enum optc_dsc_mode dsc_mode,
 		uint32_t dsc_bytes_per_pixel,
 		uint32_t dsc_slice_width);
-#endif
 
 void optc3_set_timing_db_mode(struct timing_generator *optc, bool enable);
 
 void optc3_set_odm_bypass(struct timing_generator *optc,
 		const struct dc_crtc_timing *dc_crtc_timing);
+void optc3_set_odm_combine(struct timing_generator *optc, int *opp_id, int opp_cnt,
+		struct dc_crtc_timing *timing);
+void optc3_wait_drr_doublebuffer_pending_clear(struct timing_generator *optc);
 void optc3_tg_init(struct timing_generator *optc);
 void optc3_set_vtotal_min_max(struct timing_generator *optc, int vtotal_min, int vtotal_max);
 #endif /* __DC_OPTC_DCN30_H__ */

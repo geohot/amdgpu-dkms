@@ -78,7 +78,7 @@ static void update_cu_mask(struct mqd_manager *mm, void *mqd,
 		return;
 
 	mqd_symmetrically_map_cu_mask(mm,
-		minfo->cu_mask.ptr, minfo->cu_mask.count, se_mask);
+		minfo->cu_mask.ptr, minfo->cu_mask.count, se_mask, 0);
 
 	m = get_mqd(mqd);
 	m->compute_static_thread_mgmt_se0 = se_mask[0];
@@ -99,7 +99,7 @@ static void set_priority(struct cik_mqd *m, struct queue_properties *q)
 	m->cp_hqd_queue_priority = q->priority;
 }
 
-static struct kfd_mem_obj *allocate_mqd(struct kfd_dev *kfd,
+static struct kfd_mem_obj *allocate_mqd(struct kfd_node *kfd,
 					struct queue_properties *q)
 {
 	struct kfd_mem_obj *mqd_mem_obj;
@@ -192,7 +192,7 @@ static int load_mqd(struct mqd_manager *mm, void *mqd, uint32_t pipe_id,
 
 	return mm->dev->kfd2kgd->hqd_load(mm->dev->adev, mqd, pipe_id, queue_id,
 					  (uint32_t __user *)p->write_ptr,
-					  wptr_shift, wptr_mask, mms);
+					  wptr_shift, wptr_mask, mms, 0);
 }
 
 static void __update_mqd(struct mqd_manager *mm, void *mqd,
@@ -235,13 +235,6 @@ static void __update_mqd(struct mqd_manager *mm, void *mqd,
 	q->is_active = QUEUE_IS_ACTIVE(*q);
 }
 
-static void update_mqd(struct mqd_manager *mm, void *mqd,
-			struct queue_properties *q,
-			struct mqd_update_info *minfo)
-{
-	__update_mqd(mm, mqd, q, minfo, 1);
-}
-
 static uint32_t read_doorbell_id(void *mqd)
 {
 	struct cik_mqd *m = (struct cik_mqd *)mqd;
@@ -249,9 +242,9 @@ static uint32_t read_doorbell_id(void *mqd)
 	return m->queue_doorbell_id0;
 }
 
-static void update_mqd_hawaii(struct mqd_manager *mm, void *mqd,
-			struct queue_properties *q,
-			struct mqd_update_info *minfo)
+static void update_mqd(struct mqd_manager *mm, void *mqd,
+		       struct queue_properties *q,
+		       struct mqd_update_info *minfo)
 {
 	__update_mqd(mm, mqd, q, minfo, 0);
 }
@@ -416,9 +409,8 @@ static int debugfs_show_mqd_sdma(struct seq_file *m, void *data)
 
 #endif
 
-
 struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
-		struct kfd_dev *dev)
+		struct kfd_node *dev)
 {
 	struct mqd_manager *mqd;
 
@@ -458,6 +450,7 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 		mqd->is_occupied = kfd_is_occupied_cp;
 		mqd->check_queue_active = check_queue_active;
 		mqd->mqd_size = sizeof(struct cik_mqd);
+		mqd->mqd_stride = kfd_mqd_stride;
 #if defined(CONFIG_DEBUG_FS)
 		mqd->debugfs_show_mqd = debugfs_show_mqd;
 #endif
@@ -472,6 +465,7 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 		mqd->destroy_mqd = kfd_destroy_mqd_cp;
 		mqd->is_occupied = kfd_is_occupied_cp;
 		mqd->mqd_size = sizeof(struct cik_mqd);
+		mqd->mqd_stride = kfd_mqd_stride;
 #if defined(CONFIG_DEBUG_FS)
 		mqd->debugfs_show_mqd = debugfs_show_mqd;
 #endif
@@ -488,6 +482,7 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 		mqd->checkpoint_mqd = checkpoint_mqd_sdma;
 		mqd->restore_mqd = restore_mqd_sdma;
 		mqd->mqd_size = sizeof(struct cik_sdma_rlc_registers);
+		mqd->mqd_stride = kfd_mqd_stride;
 #if defined(CONFIG_DEBUG_FS)
 		mqd->debugfs_show_mqd = debugfs_show_mqd_sdma;
 #endif
@@ -497,18 +492,5 @@ struct mqd_manager *mqd_manager_init_cik(enum KFD_MQD_TYPE type,
 		return NULL;
 	}
 
-	return mqd;
-}
-
-struct mqd_manager *mqd_manager_init_cik_hawaii(enum KFD_MQD_TYPE type,
-			struct kfd_dev *dev)
-{
-	struct mqd_manager *mqd;
-
-	mqd = mqd_manager_init_cik(type, dev);
-	if (!mqd)
-		return NULL;
-	if (type == KFD_MQD_TYPE_CP)
-		mqd->update_mqd = update_mqd_hawaii;
 	return mqd;
 }

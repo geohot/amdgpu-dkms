@@ -38,6 +38,25 @@ static void drm_block_free(struct drm_buddy *mm,
 	kmem_cache_free(slab_blocks, block);
 }
 
+static void list_insert_sorted(struct drm_buddy *mm,
+			       struct drm_buddy_block *block)
+{
+	struct drm_buddy_block *node;
+	struct list_head *head;
+
+	head = &mm->free_list[drm_buddy_block_order(block)];
+	if (list_empty(head)) {
+		list_add(&block->link, head);
+		return;
+	}
+
+	list_for_each_entry(node, head, link)
+		if (drm_buddy_block_offset(block) < drm_buddy_block_offset(node))
+			break;
+
+	__list_add(&block->link, node->link.prev, &node->link);
+}
+
 static void mark_allocated(struct drm_buddy_block *block)
 {
 	block->header &= ~DRM_BUDDY_HEADER_STATE;
@@ -52,8 +71,7 @@ static void mark_free(struct drm_buddy *mm,
 	block->header &= ~DRM_BUDDY_HEADER_STATE;
 	block->header |= DRM_BUDDY_FREE;
 
-	list_add(&block->link,
-		 &mm->free_list[drm_buddy_block_order(block)]);
+	list_insert_sorted(mm, block);
 }
 
 static void mark_split(struct drm_buddy_block *block)
@@ -128,8 +146,8 @@ int drm_buddy_init(struct drm_buddy *mm, u64 size, u64 chunk_size)
 		unsigned int order;
 		u64 root_size;
 
-		root_size = rounddown_pow_of_two(size);
-		order = ilog2(root_size) - ilog2(chunk_size);
+		order = ilog2(size) - ilog2(chunk_size);
+		root_size = chunk_size << order;
 
 		root = drm_block_alloc(mm, NULL, order, offset);
 		if (!root)
@@ -387,20 +405,26 @@ err_undo:
 }
 
 static struct drm_buddy_block *
-get_maxblock(struct list_head *head)
+get_maxblock(struct drm_buddy *mm, unsigned int order)
 {
 	struct drm_buddy_block *max_block = NULL, *node;
+	unsigned int i;
 
-	max_block = list_first_entry_or_null(head,
-					     struct drm_buddy_block,
-					     link);
-	if (!max_block)
-		return NULL;
+	for (i = order; i <= mm->max_order; ++i) {
+		if (!list_empty(&mm->free_list[i])) {
+			node = list_last_entry(&mm->free_list[i],
+					       struct drm_buddy_block,
+					       link);
+			if (!max_block) {
+				max_block = node;
+				continue;
+			}
 
-	list_for_each_entry(node, head, link) {
-		if (drm_buddy_block_offset(node) >
-		    drm_buddy_block_offset(max_block))
-			max_block = node;
+			if (drm_buddy_block_offset(node) >
+			    drm_buddy_block_offset(max_block)) {
+				max_block = node;
+			}
+		}
 	}
 
 	return max_block;
@@ -412,20 +436,23 @@ alloc_from_freelist(struct drm_buddy *mm,
 		    unsigned long flags)
 {
 	struct drm_buddy_block *block = NULL;
-	unsigned int i;
+	unsigned int tmp;
 	int err;
 
-	for (i = order; i <= mm->max_order; ++i) {
-		if (flags & DRM_BUDDY_TOPDOWN_ALLOCATION) {
-			block = get_maxblock(&mm->free_list[i]);
-			if (block)
-				break;
-		} else {
-			block = list_first_entry_or_null(&mm->free_list[i],
-							 struct drm_buddy_block,
-							 link);
-			if (block)
-				break;
+	if (flags & DRM_BUDDY_TOPDOWN_ALLOCATION) {
+		block = get_maxblock(mm, order);
+		if (block)
+			/* Store the obtained block order */
+			tmp = drm_buddy_block_order(block);
+	} else {
+		for (tmp = order; tmp <= mm->max_order; ++tmp) {
+			if (!list_empty(&mm->free_list[tmp])) {
+				block = list_last_entry(&mm->free_list[tmp],
+							struct drm_buddy_block,
+							link);
+				if (block)
+					break;
+			}
 		}
 	}
 
@@ -434,18 +461,18 @@ alloc_from_freelist(struct drm_buddy *mm,
 
 	BUG_ON(!drm_buddy_block_is_free(block));
 
-	while (i != order) {
+	while (tmp != order) {
 		err = split_block(mm, block);
 		if (unlikely(err))
 			goto err_undo;
 
 		block = block->right;
-		i--;
+		tmp--;
 	}
 	return block;
 
 err_undo:
-	if (i != order)
+	if (tmp != order)
 		__drm_buddy_free(mm, block);
 	return ERR_PTR(err);
 }
@@ -453,10 +480,12 @@ err_undo:
 static int __alloc_range(struct drm_buddy *mm,
 			 struct list_head *dfs,
 			 u64 start, u64 size,
-			 struct list_head *blocks)
+			 struct list_head *blocks,
+			 u64 *total_allocated_on_err)
 {
 	struct drm_buddy_block *block;
 	struct drm_buddy_block *buddy;
+	u64 total_allocated = 0;
 	LIST_HEAD(allocated);
 	u64 end;
 	int err;
@@ -493,6 +522,7 @@ static int __alloc_range(struct drm_buddy *mm,
 			}
 
 			mark_allocated(block);
+			total_allocated += drm_buddy_block_size(mm, block);
 			mm->avail -= drm_buddy_block_size(mm, block);
 			list_add_tail(&block->link, &allocated);
 			continue;
@@ -524,13 +554,20 @@ err_undo:
 		__drm_buddy_free(mm, block);
 
 err_free:
-	drm_buddy_free_list(mm, &allocated);
+	if (err == -ENOSPC && total_allocated_on_err) {
+		list_splice_tail(&allocated, blocks);
+		*total_allocated_on_err = total_allocated;
+	} else {
+		drm_buddy_free_list(mm, &allocated);
+	}
+
 	return err;
 }
 
 static int __drm_buddy_alloc_range(struct drm_buddy *mm,
 				   u64 start,
 				   u64 size,
+				   u64 *total_allocated_on_err,
 				   struct list_head *blocks)
 {
 	LIST_HEAD(dfs);
@@ -539,7 +576,62 @@ static int __drm_buddy_alloc_range(struct drm_buddy *mm,
 	for (i = 0; i < mm->n_roots; ++i)
 		list_add_tail(&mm->roots[i]->tmp_link, &dfs);
 
-	return __alloc_range(mm, &dfs, start, size, blocks);
+	return __alloc_range(mm, &dfs, start, size,
+			     blocks, total_allocated_on_err);
+}
+
+static int __alloc_contig_try_harder(struct drm_buddy *mm,
+				     u64 size,
+				     u64 min_block_size,
+				     struct list_head *blocks)
+{
+	u64 rhs_offset, lhs_offset, lhs_size, filled;
+	struct drm_buddy_block *block;
+	struct list_head *list;
+	LIST_HEAD(blocks_lhs);
+	unsigned long pages;
+	unsigned int order;
+	u64 modify_size;
+	int err;
+
+	modify_size = rounddown_pow_of_two(size);
+	pages = modify_size >> ilog2(mm->chunk_size);
+	order = fls(pages) - 1;
+	if (order == 0)
+		return -ENOSPC;
+
+	list = &mm->free_list[order];
+	if (list_empty(list))
+		return -ENOSPC;
+
+	list_for_each_entry_reverse(block, list, link) {
+		/* Allocate blocks traversing RHS */
+		rhs_offset = drm_buddy_block_offset(block);
+		err =  __drm_buddy_alloc_range(mm, rhs_offset, size,
+					       &filled, blocks);
+		if (!err || err != -ENOSPC)
+			return err;
+
+		lhs_size = max((size - filled), min_block_size);
+		if (!IS_ALIGNED(lhs_size, min_block_size))
+			lhs_size = round_up(lhs_size, min_block_size);
+
+		/* Allocate blocks traversing LHS */
+		lhs_offset = drm_buddy_block_offset(block) - lhs_size;
+		err =  __drm_buddy_alloc_range(mm, lhs_offset, lhs_size,
+					       NULL, &blocks_lhs);
+		if (!err) {
+			list_splice(&blocks_lhs, blocks);
+			return 0;
+		} else if (err != -ENOSPC) {
+			drm_buddy_free_list(mm, blocks);
+			return err;
+		}
+		/* Free blocks for the next iteration */
+		drm_buddy_free_list(mm, blocks);
+	}
+
+	return -ENOSPC;
 }
 
 /**
@@ -599,7 +691,7 @@ int drm_buddy_block_trim(struct drm_buddy *mm,
 
 	new_start = drm_buddy_block_offset(block);
 	list_add(&block->tmp_link, &dfs);
-	err =  __alloc_range(mm, &dfs, new_start, new_size, blocks);
+	err =  __alloc_range(mm, &dfs, new_start, new_size, blocks, NULL);
 	if (err) {
 		mark_allocated(block);
 		mm->avail -= drm_buddy_block_size(mm, block);
@@ -618,7 +710,7 @@ EXPORT_SYMBOL(drm_buddy_block_trim);
  * @start: start of the allowed range for this block
  * @end: end of the allowed range for this block
  * @size: size of the allocation
- * @min_page_size: alignment of the allocation
+ * @min_block_size: alignment of the allocation
  * @blocks: output list head to add allocated blocks
  * @flags: DRM_BUDDY_*_ALLOCATION flags
  *
@@ -633,23 +725,24 @@ EXPORT_SYMBOL(drm_buddy_block_trim);
  */
 int drm_buddy_alloc_blocks(struct drm_buddy *mm,
 			   u64 start, u64 end, u64 size,
-			   u64 min_page_size,
+			   u64 min_block_size,
 			   struct list_head *blocks,
 			   unsigned long flags)
 {
 	struct drm_buddy_block *block = NULL;
+	u64 original_size, original_min_size;
 	unsigned int min_order, order;
-	unsigned long pages;
 	LIST_HEAD(allocated);
+	unsigned long pages;
 	int err;
 
 	if (size < mm->chunk_size)
 		return -EINVAL;
 
-	if (min_page_size < mm->chunk_size)
+	if (min_block_size < mm->chunk_size)
 		return -EINVAL;
 
-	if (!is_power_of_2(min_page_size))
+	if (!is_power_of_2(min_block_size))
 		return -EINVAL;
 
 	if (!IS_ALIGNED(start | end | size, mm->chunk_size))
@@ -663,14 +756,23 @@ int drm_buddy_alloc_blocks(struct drm_buddy *mm,
 
 	/* Actual range allocation */
 	if (start + size == end)
-		return __drm_buddy_alloc_range(mm, start, size, blocks);
+		return __drm_buddy_alloc_range(mm, start, size, NULL, blocks);
 
-	if (!IS_ALIGNED(size, min_page_size))
-		return -EINVAL;
+	original_size = size;
+	original_min_size = min_block_size;
+
+	/* Roundup the size to power of 2 */
+	if (flags & DRM_BUDDY_CONTIGUOUS_ALLOCATION) {
+		size = roundup_pow_of_two(size);
+		min_block_size = size;
+	/* Align size value to min_block_size */
+	} else if (!IS_ALIGNED(size, min_block_size)) {
+		size = round_up(size, min_block_size);
+	}
 
 	pages = size >> ilog2(mm->chunk_size);
 	order = fls(pages) - 1;
-	min_order = ilog2(min_page_size) - ilog2(mm->chunk_size);
+	min_order = ilog2(min_block_size) - ilog2(mm->chunk_size);
 
 	do {
 		order = min(order, (unsigned int)fls(pages) - 1);
@@ -689,6 +791,16 @@ int drm_buddy_alloc_blocks(struct drm_buddy *mm,
 				break;
 
 			if (order-- == min_order) {
+				if (flags & DRM_BUDDY_CONTIGUOUS_ALLOCATION &&
+				    !(flags & DRM_BUDDY_RANGE_ALLOCATION))
+					/*
+					 * Try contiguous block allocation through
+					 * try harder method
+					 */
+					return __alloc_contig_try_harder(mm,
+									 original_size,
+									 original_min_size,
+									 blocks);
 				err = -ENOSPC;
 				goto err_free;
 			}
@@ -704,6 +816,31 @@ int drm_buddy_alloc_blocks(struct drm_buddy *mm,
 		if (!pages)
 			break;
 	} while (1);
+
+	/* Trim the allocated block to the required size */
+	if (original_size != size) {
+		struct list_head *trim_list;
+		LIST_HEAD(temp);
+		u64 trim_size;
+
+		trim_list = &allocated;
+		trim_size = original_size;
+
+		if (!list_is_singular(&allocated)) {
+			block = list_last_entry(&allocated, typeof(*block), link);
+			list_move(&block->link, &temp);
+			trim_list = &temp;
+			trim_size = drm_buddy_block_size(mm, block) -
+				(size - original_size);
+		}
+
+		drm_buddy_block_trim(mm,
+				     trim_size,
+				     trim_list);
+
+		if (!list_empty(&temp))
+			list_splice_tail(trim_list, &allocated);
+	}
 
 	list_splice_tail(&allocated, blocks);
 	return 0;
@@ -754,15 +891,15 @@ void drm_buddy_print(struct drm_buddy *mm, struct drm_printer *p)
 			count++;
 		}
 
-		drm_printf(p, "order-%d ", order);
+		drm_printf(p, "order-%2d ", order);
 
 		free = count * (mm->chunk_size << order);
 		if (free < SZ_1M)
-			drm_printf(p, "free: %lluKiB", free >> 10);
+			drm_printf(p, "free: %8llu KiB", free >> 10);
 		else
-			drm_printf(p, "free: %lluMiB", free >> 20);
+			drm_printf(p, "free: %8llu MiB", free >> 20);
 
-		drm_printf(p, ", pages: %llu\n", count);
+		drm_printf(p, ", blocks: %llu\n", count);
 	}
 }
 EXPORT_SYMBOL(drm_buddy_print);

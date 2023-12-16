@@ -25,8 +25,9 @@
  */
 
 #include <drm/display/drm_dp_helper.h>
+#include <drm/drm_crtc_helper.h>
 #include <drm/drm_edid.h>
-#include <drm/drm_fb_helper.h>
+#include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
 #include <drm/amdgpu_drm.h>
 #include "amdgpu.h"
@@ -38,13 +39,6 @@
 #include "amdgpu_display.h"
 
 #include <linux/pm_runtime.h>
-
-#ifndef HAVE_DRM_KMS_HELPER_IS_POLL_WORKER
-bool inline drm_kms_helper_is_poll_worker(void)
-{
-	return false;
-}
-#endif
 
 void amdgpu_connector_hotplug(struct drm_connector *connector)
 {
@@ -186,20 +180,12 @@ int amdgpu_connector_get_monitor_bpc(struct drm_connector *connector)
 		}
 
 		/* Any defined maximum tmds clock limit we must not exceed? */
-#ifndef HAVE_DRM_DISPLAY_INFO_MAX_TMDS_CLOCK
-		if (connector->max_tmds_clock > 0) {
-#else
 		if (connector->display_info.max_tmds_clock > 0) {
-#endif
 			/* mode_clock is clock in kHz for mode to be modeset on this connector */
 			mode_clock = amdgpu_connector->pixelclock_for_modeset;
 
 			/* Maximum allowable input clock in kHz */
-#ifndef HAVE_DRM_DISPLAY_INFO_MAX_TMDS_CLOCK
-			max_tmds_clock = connector->max_tmds_clock;
-#else
 			max_tmds_clock = connector->display_info.max_tmds_clock;
-#endif
 
 			DRM_DEBUG("%s: hdmi mode dotclock %d kHz, max tmds input clock %d kHz.\n",
 				  connector->name, mode_clock, max_tmds_clock);
@@ -312,16 +298,9 @@ struct edid *amdgpu_connector_edid(struct drm_connector *connector)
 static struct edid *
 amdgpu_connector_get_hardcoded_edid(struct amdgpu_device *adev)
 {
-	struct edid *edid;
-
 	if (adev->mode_info.bios_hardcoded_edid) {
-		edid = kmalloc(adev->mode_info.bios_hardcoded_edid_size, GFP_KERNEL);
-		if (edid) {
-			memcpy((unsigned char *)edid,
-			       (unsigned char *)adev->mode_info.bios_hardcoded_edid,
-			       adev->mode_info.bios_hardcoded_edid_size);
-			return edid;
-		}
+		return kmemdup((unsigned char *)adev->mode_info.bios_hardcoded_edid,
+			       adev->mode_info.bios_hardcoded_edid_size, GFP_KERNEL);
 	}
 	return NULL;
 }
@@ -648,11 +627,20 @@ static int amdgpu_connector_set_property(struct drm_connector *connector,
 
 		switch (val) {
 		default:
-		case DRM_MODE_SCALE_NONE: rmx_type = RMX_OFF; break;
-		case DRM_MODE_SCALE_CENTER: rmx_type = RMX_CENTER; break;
-		case DRM_MODE_SCALE_ASPECT: rmx_type = RMX_ASPECT; break;
-		case DRM_MODE_SCALE_FULLSCREEN: rmx_type = RMX_FULL; break;
+		case DRM_MODE_SCALE_NONE:
+			rmx_type = RMX_OFF;
+			break;
+		case DRM_MODE_SCALE_CENTER:
+			rmx_type = RMX_CENTER;
+			break;
+		case DRM_MODE_SCALE_ASPECT:
+			rmx_type = RMX_ASPECT;
+			break;
+		case DRM_MODE_SCALE_FULLSCREEN:
+			rmx_type = RMX_FULL;
+			break;
 		}
+
 		if (amdgpu_encoder->rmx_type == rmx_type)
 			return 0;
 
@@ -813,7 +801,6 @@ amdgpu_connector_lvds_detect(struct drm_connector *connector, bool force)
 	return ret;
 }
 
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 static void amdgpu_connector_unregister(struct drm_connector *connector)
 {
 	struct amdgpu_connector *amdgpu_connector = to_amdgpu_connector(connector);
@@ -823,7 +810,6 @@ static void amdgpu_connector_unregister(struct drm_connector *connector)
 		amdgpu_connector->ddc_bus->has_aux = false;
 	}
 }
-#endif
 
 static void amdgpu_connector_destroy(struct drm_connector *connector)
 {
@@ -856,12 +842,21 @@ static int amdgpu_connector_set_lcd_property(struct drm_connector *connector,
 	}
 
 	switch (value) {
-	case DRM_MODE_SCALE_NONE: rmx_type = RMX_OFF; break;
-	case DRM_MODE_SCALE_CENTER: rmx_type = RMX_CENTER; break;
-	case DRM_MODE_SCALE_ASPECT: rmx_type = RMX_ASPECT; break;
+	case DRM_MODE_SCALE_NONE:
+		rmx_type = RMX_OFF;
+		break;
+	case DRM_MODE_SCALE_CENTER:
+		rmx_type = RMX_CENTER;
+		break;
+	case DRM_MODE_SCALE_ASPECT:
+		rmx_type = RMX_ASPECT;
+		break;
 	default:
-	case DRM_MODE_SCALE_FULLSCREEN: rmx_type = RMX_FULL; break;
+	case DRM_MODE_SCALE_FULLSCREEN:
+		rmx_type = RMX_FULL;
+		break;
 	}
+
 	if (amdgpu_encoder->rmx_type == rmx_type)
 		return 0;
 
@@ -882,9 +877,7 @@ static const struct drm_connector_funcs amdgpu_connector_lvds_funcs = {
 	.dpms = drm_helper_connector_dpms,
 	.detect = amdgpu_connector_lvds_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.early_unregister = amdgpu_connector_unregister,
-#endif
 	.destroy = amdgpu_connector_destroy,
 	.set_property = amdgpu_connector_set_lcd_property,
 };
@@ -1002,9 +995,7 @@ static const struct drm_connector_funcs amdgpu_connector_vga_funcs = {
 	.dpms = drm_helper_connector_dpms,
 	.detect = amdgpu_connector_vga_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.early_unregister = amdgpu_connector_unregister,
-#endif
 	.destroy = amdgpu_connector_destroy,
 	.set_property = amdgpu_connector_set_property,
 };
@@ -1117,19 +1108,13 @@ amdgpu_connector_dvi_detect(struct drm_connector *connector, bool force)
 			 */
 			if (amdgpu_connector->shared_ddc && (ret == connector_status_connected)) {
 				struct drm_connector *list_connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 				struct drm_connector_list_iter iter;
-#endif
 				struct amdgpu_connector *list_amdgpu_connector;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 				drm_connector_list_iter_begin(dev, &iter);
 				drm_for_each_connector_iter(list_connector,
 							    &iter) {
 
-#else
-				list_for_each_entry(list_connector, &(dev)->mode_config.connector_list, head) {
-#endif
 					if (connector == list_connector)
 						continue;
 					list_amdgpu_connector = to_amdgpu_connector(list_connector);
@@ -1146,9 +1131,7 @@ amdgpu_connector_dvi_detect(struct drm_connector *connector, bool force)
 						}
 					}
 				}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 				drm_connector_list_iter_end(&iter);
-#endif
 			}
 		}
 	}
@@ -1204,7 +1187,8 @@ amdgpu_connector_dvi_detect(struct drm_connector *connector, bool force)
 					/* assume digital unless load detected otherwise */
 					amdgpu_connector->use_digital = true;
 					lret = encoder_funcs->detect(encoder, connector);
-					DRM_DEBUG_KMS("load_detect %x returned: %x\n",encoder->encoder_type,lret);
+					DRM_DEBUG_KMS("load_detect %x returned: %x\n",
+						      encoder->encoder_type, lret);
 					if (lret == connector_status_connected)
 						amdgpu_connector->use_digital = false;
 				}
@@ -1321,9 +1305,7 @@ static const struct drm_connector_funcs amdgpu_connector_dvi_funcs = {
 	.detect = amdgpu_connector_dvi_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.set_property = amdgpu_connector_set_property,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.early_unregister = amdgpu_connector_unregister,
-#endif
 	.destroy = amdgpu_connector_destroy,
 	.force = amdgpu_connector_dvi_force,
 };
@@ -1618,7 +1600,6 @@ static enum drm_mode_status amdgpu_connector_dp_mode_valid(struct drm_connector 
 	return MODE_OK;
 }
 
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 static int
 amdgpu_connector_late_register(struct drm_connector *connector)
 {
@@ -1632,7 +1613,6 @@ amdgpu_connector_late_register(struct drm_connector *connector)
 
 	return r;
 }
-#endif
 
 static const struct drm_connector_helper_funcs amdgpu_connector_dp_helper_funcs = {
 	.get_modes = amdgpu_connector_dp_get_modes,
@@ -1645,14 +1625,10 @@ static const struct drm_connector_funcs amdgpu_connector_dp_funcs = {
 	.detect = amdgpu_connector_dp_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.set_property = amdgpu_connector_set_property,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.early_unregister = amdgpu_connector_unregister,
-#endif
 	.destroy = amdgpu_connector_destroy,
 	.force = amdgpu_connector_dvi_force,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.late_register = amdgpu_connector_late_register,
-#endif
 };
 
 static const struct drm_connector_funcs amdgpu_connector_edp_funcs = {
@@ -1660,14 +1636,10 @@ static const struct drm_connector_funcs amdgpu_connector_edp_funcs = {
 	.detect = amdgpu_connector_dp_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.set_property = amdgpu_connector_set_lcd_property,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.early_unregister = amdgpu_connector_unregister,
-#endif
 	.destroy = amdgpu_connector_destroy,
 	.force = amdgpu_connector_dvi_force,
-#if defined(HAVE_DRM_CONNECTOR_FUNCS_REGISTER)
 	.late_register = amdgpu_connector_late_register,
-#endif
 };
 
 void
@@ -1682,9 +1654,7 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 {
 	struct drm_device *dev = adev_to_drm(adev);
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	struct amdgpu_connector *amdgpu_connector;
 	struct amdgpu_connector_atom_dig *amdgpu_dig_connector;
 	struct drm_encoder *encoder;
@@ -1699,18 +1669,12 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 		return;
 
 	/* see if we already added it */
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		amdgpu_connector = to_amdgpu_connector(connector);
 		if (amdgpu_connector->connector_id == connector_id) {
 			amdgpu_connector->devices |= supported_device;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 			drm_connector_list_iter_end(&iter);
-#endif
 			return;
 		}
 		if (amdgpu_connector->ddc_bus && i2c_bus->valid) {
@@ -1725,9 +1689,7 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 			}
 		}
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 
 	/* check if it's a dp bridge */
 	list_for_each_entry(encoder, &dev->mode_config.encoder_list, head) {
@@ -2123,7 +2085,7 @@ amdgpu_connector_add(struct amdgpu_device *adev,
 	if (amdgpu_connector->hpd.hpd == AMDGPU_HPD_NONE) {
 		if (i2c_bus->valid) {
 			connector->polled = DRM_CONNECTOR_POLL_CONNECT |
-			                    DRM_CONNECTOR_POLL_DISCONNECT;
+						DRM_CONNECTOR_POLL_DISCONNECT;
 		}
 	} else
 		connector->polled = DRM_CONNECTOR_POLL_HPD;

@@ -21,6 +21,7 @@
  */
 #include "amdgpu.h"
 #include "amdgpu_amdkfd.h"
+#include "amdgpu_amdkfd_gfx_v10.h"
 #include "gc/gc_10_1_0_offset.h"
 #include "gc/gc_10_1_0_sh_mask.h"
 #include "athub/athub_2_0_0_offset.h"
@@ -39,8 +40,6 @@ enum hqd_dequeue_request_type {
 	RESET_WAVES,
 	SAVE_WAVES
 };
-
-#define TCP_WATCH_STRIDE (mmTCP_WATCH1_ADDR_H - mmTCP_WATCH0_ADDR_H)
 
 static void lock_srbm(struct amdgpu_device *adev, uint32_t mec, uint32_t pipe,
 			uint32_t queue, uint32_t vmid)
@@ -82,7 +81,7 @@ static void kgd_program_sh_mem_settings(struct amdgpu_device *adev, uint32_t vmi
 					uint32_t sh_mem_config,
 					uint32_t sh_mem_ape1_base,
 					uint32_t sh_mem_ape1_limit,
-					uint32_t sh_mem_bases)
+					uint32_t sh_mem_bases, uint32_t inst)
 {
 	lock_srbm(adev, 0, 0, 0, vmid);
 
@@ -94,7 +93,7 @@ static void kgd_program_sh_mem_settings(struct amdgpu_device *adev, uint32_t vmi
 }
 
 static int kgd_set_pasid_vmid_mapping(struct amdgpu_device *adev, u32 pasid,
-					unsigned int vmid)
+					unsigned int vmid, uint32_t inst)
 {
 	/*
 	 * We have to assume that there is no outstanding mapping.
@@ -138,7 +137,8 @@ static int kgd_set_pasid_vmid_mapping(struct amdgpu_device *adev, u32 pasid,
  * but still works
  */
 
-static int kgd_init_interrupts(struct amdgpu_device *adev, uint32_t pipe_id)
+static int kgd_init_interrupts(struct amdgpu_device *adev, uint32_t pipe_id,
+				uint32_t inst)
 {
 	uint32_t mec;
 	uint32_t pipe;
@@ -208,7 +208,7 @@ static inline struct v10_sdma_mqd *get_sdma_mqd(void *mqd)
 static int kgd_hqd_load(struct amdgpu_device *adev, void *mqd,
 			uint32_t pipe_id, uint32_t queue_id,
 			uint32_t __user *wptr, uint32_t wptr_shift,
-			uint32_t wptr_mask, struct mm_struct *mm)
+			uint32_t wptr_mask, struct mm_struct *mm, uint32_t inst)
 {
 	struct v10_compute_mqd *m;
 	uint32_t *mqd_hqd;
@@ -289,9 +289,9 @@ static int kgd_hqd_load(struct amdgpu_device *adev, void *mqd,
 
 static int kgd_hiq_mqd_load(struct amdgpu_device *adev, void *mqd,
 			    uint32_t pipe_id, uint32_t queue_id,
-			    uint32_t doorbell_off)
+			    uint32_t doorbell_off, uint32_t inst)
 {
-	struct amdgpu_ring *kiq_ring = &adev->gfx.kiq.ring;
+	struct amdgpu_ring *kiq_ring = &adev->gfx.kiq[0].ring;
 	struct v10_compute_mqd *m;
 	uint32_t mec, pipe;
 	int r;
@@ -306,7 +306,7 @@ static int kgd_hiq_mqd_load(struct amdgpu_device *adev, void *mqd,
 	pr_debug("kfd: set HIQ, mec:%d, pipe:%d, queue:%d.\n",
 		 mec, pipe, queue_id);
 
-	spin_lock(&adev->gfx.kiq.ring_lock);
+	spin_lock(&adev->gfx.kiq[0].ring_lock);
 	r = amdgpu_ring_alloc(kiq_ring, 7);
 	if (r) {
 		pr_err("Failed to alloc KIQ (%d).\n", r);
@@ -333,7 +333,7 @@ static int kgd_hiq_mqd_load(struct amdgpu_device *adev, void *mqd,
 	amdgpu_ring_commit(kiq_ring);
 
 out_unlock:
-	spin_unlock(&adev->gfx.kiq.ring_lock);
+	spin_unlock(&adev->gfx.kiq[0].ring_lock);
 	release_queue(adev);
 
 	return r;
@@ -341,7 +341,7 @@ out_unlock:
 
 static int kgd_hqd_dump(struct amdgpu_device *adev,
 			uint32_t pipe_id, uint32_t queue_id,
-			uint32_t (**dump)[2], uint32_t *n_regs)
+			uint32_t (**dump)[2], uint32_t *n_regs, uint32_t inst)
 {
 	uint32_t i = 0, reg;
 #define HQD_N_REGS 56
@@ -472,7 +472,7 @@ static int kgd_hqd_sdma_dump(struct amdgpu_device *adev,
 
 static bool kgd_hqd_is_occupied(struct amdgpu_device *adev,
 				uint64_t queue_address, uint32_t pipe_id,
-				uint32_t queue_id)
+				uint32_t queue_id, uint32_t inst)
 {
 	uint32_t act;
 	bool retval = false;
@@ -513,7 +513,7 @@ static bool kgd_hqd_sdma_is_occupied(struct amdgpu_device *adev, void *mqd)
 static int kgd_hqd_destroy(struct amdgpu_device *adev, void *mqd,
 				enum kfd_preempt_type reset_type,
 				unsigned int utimeout, uint32_t pipe_id,
-				uint32_t queue_id)
+				uint32_t queue_id, uint32_t inst)
 {
 	enum hqd_dequeue_request_type type;
 	unsigned long end_jiffies;
@@ -676,7 +676,7 @@ static bool get_atc_vmid_pasid_mapping_info(struct amdgpu_device *adev,
 
 static int kgd_wave_control_execute(struct amdgpu_device *adev,
 					uint32_t gfx_index_val,
-					uint32_t sq_cmd)
+					uint32_t sq_cmd, uint32_t inst)
 {
 	uint32_t data = 0;
 
@@ -723,8 +723,7 @@ static void set_vm_context_page_table_base(struct amdgpu_device *adev,
  *   SPI in order for debug trap settings to take effect on those waves.
  *   This is roughly a ~3500 clock cycle wait on SPI where a read on
  *   SPI_GDBG_WAVE_CNTL translates to ~32 clock cycles.
- *   KGD_GFX_V10_WAVE_LAUNCH_SPI_DRAIN_LATENCY indicates the number of reads
- *   required.
+ *   KGD_GFX_V10_WAVE_LAUNCH_SPI_DRAIN_LATENCY indicates the number of reads required.
  *
  *   NOTE: We can afford to clear the entire STALL_VMID field on unstall
  *   because current GFX10 chips cannot support multi-process debugging due to
@@ -734,9 +733,7 @@ static void set_vm_context_page_table_base(struct amdgpu_device *adev,
  */
 
 #define KGD_GFX_V10_WAVE_LAUNCH_SPI_DRAIN_LATENCY	110
-static void kgd_gfx_v10_set_wave_launch_stall(struct amdgpu_device *adev,
-					uint32_t vmid,
-					bool stall)
+static void kgd_gfx_v10_set_wave_launch_stall(struct amdgpu_device *adev, uint32_t vmid, bool stall)
 {
 	uint32_t data = RREG32(SOC15_REG_OFFSET(GC, 0, mmSPI_GDBG_WAVE_CNTL));
 	int i;
@@ -820,7 +817,7 @@ int kgd_gfx_v10_validate_trap_override_request(struct amdgpu_device *adev,
 	 * processes.
 	 */
 	if (trap_override != KFD_DBG_TRAP_OVERRIDE_OR)
-		return -EPERM;
+		return -EINVAL;
 
 	return 0;
 }
@@ -864,11 +861,7 @@ uint32_t kgd_gfx_v10_set_wave_launch_mode(struct amdgpu_device *adev,
 					uint32_t vmid)
 {
 	uint32_t data = 0;
-	bool is_stall_mode;
-	bool is_mode_set;
-
-	is_stall_mode = (wave_launch_mode == 4);
-	is_mode_set = (wave_launch_mode != 0 && wave_launch_mode != 4);
+	bool is_mode_set = !!wave_launch_mode;
 
 	mutex_lock(&adev->grbm_idx_mutex);
 
@@ -880,20 +873,21 @@ uint32_t kgd_gfx_v10_set_wave_launch_mode(struct amdgpu_device *adev,
 			MODE, is_mode_set ? wave_launch_mode : 0);
 	WREG32(SOC15_REG_OFFSET(GC, 0, mmSPI_GDBG_WAVE_CNTL2), data);
 
-	if (!is_stall_mode)
-		kgd_gfx_v10_set_wave_launch_stall(adev, vmid, false);
+	kgd_gfx_v10_set_wave_launch_stall(adev, vmid, false);
 
 	mutex_unlock(&adev->grbm_idx_mutex);
 
 	return 0;
 }
 
+#define TCP_WATCH_STRIDE (mmTCP_WATCH1_ADDR_H - mmTCP_WATCH0_ADDR_H)
 uint32_t kgd_gfx_v10_set_address_watch(struct amdgpu_device *adev,
 					uint64_t watch_address,
 					uint32_t watch_address_mask,
 					uint32_t watch_id,
 					uint32_t watch_mode,
-					uint32_t debug_vmid)
+					uint32_t debug_vmid,
+					uint32_t inst)
 {
 	uint32_t watch_address_high;
 	uint32_t watch_address_low;
@@ -962,19 +956,21 @@ uint32_t kgd_gfx_v10_clear_address_watch(struct amdgpu_device *adev,
 	return 0;
 }
 
-/* kgd_get_iq_wait_times: Returns the mmCP_IQ_WAIT_TIME1/2 values
+
+/* kgd_gfx_v10_get_iq_wait_times: Returns the mmCP_IQ_WAIT_TIME1/2 values
  * The values read are:
- *	ib_offload_wait_time     -- Wait Count for Indirect Buffer Offloads.
- *	atomic_offload_wait_time -- Wait Count for L2 and GDS Atomics Offloads.
- *	wrm_offload_wait_time    -- Wait Count for WAIT_REG_MEM Offloads.
- *	gws_wait_time            -- Wait Count for Global Wave Syncs.
- *	que_sleep_wait_time      -- Wait Count for Dequeue Retry.
- *	sch_wave_wait_time       -- Wait Count for Scheduling Wave Message.
- *	sem_rearm_wait_time      -- Wait Count for Semaphore re-arm.
- *	deq_retry_wait_time      -- Wait Count for Global Wave Syncs.
+ *     ib_offload_wait_time     -- Wait Count for Indirect Buffer Offloads.
+ *     atomic_offload_wait_time -- Wait Count for L2 and GDS Atomics Offloads.
+ *     wrm_offload_wait_time    -- Wait Count for WAIT_REG_MEM Offloads.
+ *     gws_wait_time            -- Wait Count for Global Wave Syncs.
+ *     que_sleep_wait_time      -- Wait Count for Dequeue Retry.
+ *     sch_wave_wait_time       -- Wait Count for Scheduling Wave Message.
+ *     sem_rearm_wait_time      -- Wait Count for Semaphore re-arm.
+ *     deq_retry_wait_time      -- Wait Count for Global Wave Syncs.
  */
 void kgd_gfx_v10_get_iq_wait_times(struct amdgpu_device *adev,
-					uint32_t *wait_times)
+					uint32_t *wait_times,
+					uint32_t inst)
 
 {
 	*wait_times = RREG32(SOC15_REG_OFFSET(GC, 0, mmCP_IQ_WAIT_TIME2));
@@ -1004,7 +1000,8 @@ void kgd_gfx_v10_build_grace_period_packet_info(struct amdgpu_device *adev,
 }
 
 static void program_trap_handler_settings(struct amdgpu_device *adev,
-		uint32_t vmid, uint64_t tba_addr, uint64_t tma_addr)
+		uint32_t vmid, uint64_t tba_addr, uint64_t tma_addr,
+		uint32_t inst)
 {
 	lock_srbm(adev, 0, 0, 0, vmid);
 

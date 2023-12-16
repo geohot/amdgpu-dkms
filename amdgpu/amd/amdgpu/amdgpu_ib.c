@@ -62,7 +62,7 @@
  * Returns 0 on success, error on failure.
  */
 int amdgpu_ib_get(struct amdgpu_device *adev, struct amdgpu_vm *vm,
-		  unsigned size, enum amdgpu_ib_pool_type pool_type,
+		  unsigned int size, enum amdgpu_ib_pool_type pool_type,
 		  struct amdgpu_ib *ib)
 {
 	int r;
@@ -123,7 +123,7 @@ void amdgpu_ib_free(struct amdgpu_device *adev, struct amdgpu_ib *ib,
  * a CONST_IB), it will be put on the ring prior to the DE IB.  Prior
  * to SI there was just a DE IB.
  */
-int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
+int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned int num_ibs,
 		       struct amdgpu_ib *ibs, struct amdgpu_job *job,
 		       struct dma_fence **f)
 {
@@ -131,14 +131,16 @@ int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
 	struct amdgpu_ib *ib = &ibs[0];
 	struct dma_fence *tmp = NULL;
 	bool need_ctx_switch;
-	unsigned patch_offset = ~0;
+	unsigned int patch_offset = ~0;
 	struct amdgpu_vm *vm;
 	uint64_t fence_ctx;
 	uint32_t status = 0, alloc_size;
-	unsigned fence_flags = 0;
-	bool secure;
+	unsigned int fence_flags = 0;
+	bool secure, init_shadow;
+	u64 shadow_va, csa_va, gds_va;
+	int vmid = AMDGPU_JOB_GET_VMID(job);
 
-	unsigned i;
+	unsigned int i;
 	int r = 0;
 	bool need_pipe_sync = false;
 	unsigned extra_nop = 0;
@@ -151,9 +153,17 @@ int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
 		vm = job->vm;
 		fence_ctx = job->base.s_fence ?
 			job->base.s_fence->scheduled.context : 0;
+		shadow_va = job->shadow_va;
+		csa_va = job->csa_va;
+		gds_va = job->gds_va;
+		init_shadow = job->init_shadow;
 	} else {
 		vm = NULL;
 		fence_ctx = 0;
+		shadow_va = 0;
+		csa_va = 0;
+		gds_va = 0;
+		init_shadow = false;
 	}
 
 	if (!ring->sched.ready && !ring->is_mes_queue) {
@@ -188,7 +198,7 @@ int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
 
 	need_ctx_switch = ring->current_ctx != fence_ctx;
 	if (ring->funcs->emit_pipeline_sync && job &&
-	    ((tmp = amdgpu_sync_get_fence(&job->sched_sync)) ||
+	    ((tmp = amdgpu_sync_get_fence(&job->explicit_sync)) ||
 	     (amdgpu_sriov_vf(adev) && need_ctx_switch) ||
 	     amdgpu_vm_need_pipeline_sync(ring, job))) {
 		need_pipe_sync = true;
@@ -220,7 +230,12 @@ int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
 	}
 
 	amdgpu_ring_ib_begin(ring);
-	if (job && ring->funcs->init_cond_exec)
+
+	if (ring->funcs->emit_gfx_shadow)
+		amdgpu_ring_emit_gfx_shadow(ring, shadow_va, csa_va, gds_va,
+					    init_shadow, vmid);
+
+	if (ring->funcs->init_cond_exec)
 		patch_offset = amdgpu_ring_init_cond_exec(ring);
 
 	amdgpu_device_flush_hdp(adev, ring);
@@ -271,11 +286,23 @@ int amdgpu_ib_schedule(struct amdgpu_ring *ring, unsigned num_ibs,
 				       fence_flags | AMDGPU_FENCE_FLAG_64BIT);
 	}
 
+	if (ring->funcs->emit_gfx_shadow) {
+		amdgpu_ring_emit_gfx_shadow(ring, 0, 0, 0, false, 0);
+
+		if (ring->funcs->init_cond_exec) {
+			unsigned int ce_offset = ~0;
+
+			ce_offset = amdgpu_ring_init_cond_exec(ring);
+			if (ce_offset != ~0 && ring->funcs->patch_cond_exec)
+				amdgpu_ring_patch_cond_exec(ring, ce_offset);
+		}
+	}
+
 	r = amdgpu_fence_emit(ring, f, job, fence_flags);
 	if (r) {
 		dev_err(adev->dev, "failed to emit fence (%d)\n", r);
 		if (job && job->vmid)
-			amdgpu_vmid_reset(adev, ring->funcs->vmhub, job->vmid);
+			amdgpu_vmid_reset(adev, ring->vm_hub, job->vmid);
 		amdgpu_ring_undo(ring);
 		return r;
 	}
@@ -367,7 +394,7 @@ int amdgpu_ib_ring_tests(struct amdgpu_device *adev)
 {
 	long tmo_gfx, tmo_mm;
 	int r, ret = 0;
-	unsigned i;
+	unsigned int i;
 
 	tmo_mm = tmo_gfx = AMDGPU_IB_TEST_TIMEOUT;
 	if (amdgpu_sriov_vf(adev)) {
@@ -384,7 +411,7 @@ int amdgpu_ib_ring_tests(struct amdgpu_device *adev)
 		/* for CP & SDMA engines since they are scheduled together so
 		 * need to make the timeout width enough to cover the time
 		 * cost waiting for it coming back under RUNTIME only
-		*/
+		 */
 		tmo_gfx = 8 * AMDGPU_IB_TEST_TIMEOUT;
 	} else if (adev->gmc.xgmi.hive_id) {
 		tmo_gfx = AMDGPU_IB_TEST_GFX_XGMI_TIMEOUT;
@@ -445,15 +472,15 @@ int amdgpu_ib_ring_tests(struct amdgpu_device *adev)
 
 static int amdgpu_debugfs_sa_info_show(struct seq_file *m, void *unused)
 {
-	struct amdgpu_device *adev = (struct amdgpu_device *)m->private;
+	struct amdgpu_device *adev = m->private;
 
-	seq_printf(m, "--------------------- DELAYED --------------------- \n");
+	seq_puts(m, "--------------------- DELAYED ---------------------\n");
 	amdgpu_sa_bo_dump_debug_info(&adev->ib_pools[AMDGPU_IB_POOL_DELAYED],
 				     m);
-	seq_printf(m, "-------------------- IMMEDIATE -------------------- \n");
+	seq_puts(m, "-------------------- IMMEDIATE --------------------\n");
 	amdgpu_sa_bo_dump_debug_info(&adev->ib_pools[AMDGPU_IB_POOL_IMMEDIATE],
 				     m);
-	seq_printf(m, "--------------------- DIRECT ---------------------- \n");
+	seq_puts(m, "--------------------- DIRECT ----------------------\n");
 	amdgpu_sa_bo_dump_debug_info(&adev->ib_pools[AMDGPU_IB_POOL_DIRECT], m);
 
 	return 0;

@@ -98,7 +98,31 @@ static void optc32_set_odm_combine(struct timing_generator *optc, int *opp_id, i
 	optc1->opp_count = opp_cnt;
 }
 
-static void optc32_set_h_timing_div_manual_mode(struct timing_generator *optc, bool manual_mode)
+void optc32_get_odm_combine_segments(struct timing_generator *tg, int *odm_combine_segments)
+{
+	struct optc *optc1 = DCN10TG_FROM_TG(tg);
+	int segments;
+
+	REG_GET(OPTC_DATA_SOURCE_SELECT, OPTC_NUM_OF_INPUT_SEGMENT, &segments);
+
+	switch (segments) {
+	case 0:
+		*odm_combine_segments = 1;
+		break;
+	case 1:
+		*odm_combine_segments = 2;
+		break;
+	case 3:
+		*odm_combine_segments = 4;
+		break;
+	/* 2 is reserved */
+	case 2:
+	default:
+		*odm_combine_segments = -1;
+	}
+}
+
+void optc32_set_h_timing_div_manual_mode(struct timing_generator *optc, bool manual_mode)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
 
@@ -106,8 +130,11 @@ static void optc32_set_h_timing_div_manual_mode(struct timing_generator *optc, b
 			OTG_H_TIMING_DIV_MODE_MANUAL, manual_mode ? 1 : 0);
 }
 /**
- * Enable CRTC
- * Enable CRTC - call ASIC Control Object to enable Timing generator.
+ * optc32_enable_crtc() - Enable CRTC - call ASIC Control Object to enable Timing generator.
+ *
+ * @optc: timing_generator instance.
+ *
+ * Return: If CRTC is enabled, return true.
  */
 static bool optc32_enable_crtc(struct timing_generator *optc)
 {
@@ -174,7 +201,7 @@ static void optc32_disable_phantom_otg(struct timing_generator *optc)
 	REG_UPDATE(OTG_CONTROL, OTG_MASTER_EN, 0);
 }
 
-static void optc32_set_odm_bypass(struct timing_generator *optc,
+void optc32_set_odm_bypass(struct timing_generator *optc,
 		const struct dc_crtc_timing *dc_crtc_timing)
 {
 	struct optc *optc1 = DCN10TG_FROM_TG(optc);
@@ -245,16 +272,9 @@ static void optc32_set_drr(
 		}
 
 		optc->funcs->set_vtotal_min_max(optc, params->vertical_total_min - 1, params->vertical_total_max - 1);
-		optc32_setup_manual_trigger(optc);
-	} else {
-		REG_UPDATE_4(OTG_V_TOTAL_CONTROL,
-				OTG_SET_V_TOTAL_MIN_MASK, 0,
-				OTG_V_TOTAL_MIN_SEL, 0,
-				OTG_V_TOTAL_MAX_SEL, 0,
-				OTG_FORCE_LOCK_ON_EVENT, 0);
-
-		optc->funcs->set_vtotal_min_max(optc, 0, 0);
 	}
+
+	optc32_setup_manual_trigger(optc);
 }
 
 static struct timing_generator_funcs dcn32_tg_funcs = {
@@ -267,9 +287,7 @@ static struct timing_generator_funcs dcn32_tg_funcs = {
 		.enable_crtc = optc32_enable_crtc,
 		.disable_crtc = optc32_disable_crtc,
 		.phantom_crtc_post_enable = optc32_phantom_crtc_post_enable,
-#ifdef CONFIG_DRM_AMD_DC_DCN
 		.disable_phantom_crtc = optc32_disable_phantom_otg,
-#endif
 		/* used by enable_timing_synchronization. Not need for FPGA */
 		.is_counter_moving = optc1_is_counter_moving,
 		.get_position = optc1_get_position,
@@ -304,13 +322,12 @@ static struct timing_generator_funcs dcn32_tg_funcs = {
 		.setup_global_swap_lock = NULL,
 		.get_crc = optc1_get_crc,
 		.configure_crc = optc1_configure_crc,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 		.set_dsc_config = optc3_set_dsc_config,
-#endif
 		.get_dsc_status = optc2_get_dsc_status,
 		.set_dwb_source = NULL,
 		.set_odm_bypass = optc32_set_odm_bypass,
 		.set_odm_combine = optc32_set_odm_combine,
+		.get_odm_combine_segments = optc32_get_odm_combine_segments,
 		.set_h_timing_div_manual_mode = optc32_set_h_timing_div_manual_mode,
 		.get_optc_source = optc2_get_optc_source,
 		.set_out_mux = optc3_set_out_mux,

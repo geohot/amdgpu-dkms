@@ -24,6 +24,8 @@
 #include <linux/pci.h>
 
 #include <drm/drm_fourcc.h>
+#include <drm/drm_modeset_helper.h>
+#include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_vblank.h>
 
 #include "amdgpu.h"
@@ -198,13 +200,8 @@ static void dce_v6_0_page_flip(struct amdgpu_device *adev,
 	WREG32(mmGRPH_FLIP_CONTROL + amdgpu_crtc->crtc_offset, async ?
 	       GRPH_FLIP_CONTROL__GRPH_SURFACE_UPDATE_H_RETRACE_EN_MASK : 0);
 	/* update pitch */
-#if defined(HAVE_DRM_FRAMEBUFFER_FORMAT)
 	WREG32(mmGRPH_PITCH + amdgpu_crtc->crtc_offset,
 	       fb->pitches[0] / fb->format->cpp[0]);
-#else
-	WREG32(mmGRPH_PITCH + amdgpu_crtc->crtc_offset,
-	       fb->pitches[0] / (fb->bits_per_pixel / 8));
-#endif
 	/* update the scanout addresses */
 	WREG32(mmGRPH_PRIMARY_SURFACE_ADDRESS_HIGH + amdgpu_crtc->crtc_offset,
 	       upper_32_bits(crtc_base));
@@ -287,17 +284,11 @@ static void dce_v6_0_hpd_init(struct amdgpu_device *adev)
 {
 	struct drm_device *dev = adev_to_drm(adev);
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	u32 tmp;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		struct amdgpu_connector *amdgpu_connector = to_amdgpu_connector(connector);
 
 		if (amdgpu_connector->hpd.hpd >= adev->mode_info.num_hpd)
@@ -323,9 +314,7 @@ static void dce_v6_0_hpd_init(struct amdgpu_device *adev)
 		dce_v6_0_hpd_set_polarity(adev, amdgpu_connector->hpd.hpd);
 		amdgpu_irq_get(adev, &adev->hpd_irq, amdgpu_connector->hpd.hpd);
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 }
 
 /**
@@ -340,17 +329,11 @@ static void dce_v6_0_hpd_fini(struct amdgpu_device *adev)
 {
 	struct drm_device *dev = adev_to_drm(adev);
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	u32 tmp;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		struct amdgpu_connector *amdgpu_connector = to_amdgpu_connector(connector);
 
 		if (amdgpu_connector->hpd.hpd >= adev->mode_info.num_hpd)
@@ -362,9 +345,7 @@ static void dce_v6_0_hpd_fini(struct amdgpu_device *adev)
 
 		amdgpu_irq_put(adev, &adev->hpd_irq, amdgpu_connector->hpd.hpd);
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 }
 
 static u32 dce_v6_0_hpd_get_gpio_reg(struct amdgpu_device *adev)
@@ -864,7 +845,7 @@ static void dce_v6_0_program_watermarks(struct amdgpu_device *adev,
 					    (u32)mode->clock);
 		line_time = (u32) div_u64((u64)mode->crtc_htotal * 1000000,
 					  (u32)mode->clock);
-		line_time = min(line_time, (u32)65535);
+		line_time = min_t(u32, line_time, 65535);
 		priority_a_cnt = 0;
 		priority_b_cnt = 0;
 
@@ -925,9 +906,9 @@ static void dce_v6_0_program_watermarks(struct amdgpu_device *adev,
 		wm_low.num_heads = num_heads;
 
 		/* set for high clocks */
-		latency_watermark_a = min(dce_v6_0_latency_watermark(&wm_high), (u32)65535);
+		latency_watermark_a = min_t(u32, dce_v6_0_latency_watermark(&wm_high), 65535);
 		/* set for low clocks */
-		latency_watermark_b = min(dce_v6_0_latency_watermark(&wm_low), (u32)65535);
+		latency_watermark_b = min_t(u32, dce_v6_0_latency_watermark(&wm_low), 65535);
 
 		/* possibly force display priority to high */
 		/* should really do this at mode validation time... */
@@ -1155,27 +1136,19 @@ static void dce_v6_0_audio_write_latency_fields(struct drm_encoder *encoder,
 	struct amdgpu_encoder *amdgpu_encoder = to_amdgpu_encoder(encoder);
 	struct amdgpu_encoder_atom_dig *dig = amdgpu_encoder->enc_priv;
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	struct amdgpu_connector *amdgpu_connector = NULL;
 	int interlace = 0;
 	u32 tmp;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		if (connector->encoder == encoder) {
 			amdgpu_connector = to_amdgpu_connector(connector);
 			break;
 		}
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 
 	if (!amdgpu_connector) {
 		DRM_ERROR("Couldn't find encoder's connector\n");
@@ -1207,28 +1180,20 @@ static void dce_v6_0_audio_write_speaker_allocation(struct drm_encoder *encoder)
 	struct amdgpu_encoder *amdgpu_encoder = to_amdgpu_encoder(encoder);
 	struct amdgpu_encoder_atom_dig *dig = amdgpu_encoder->enc_priv;
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	struct amdgpu_connector *amdgpu_connector = NULL;
 	u8 *sadb = NULL;
 	int sad_count;
 	u32 tmp;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		if (connector->encoder == encoder) {
 			amdgpu_connector = to_amdgpu_connector(connector);
 			break;
 		}
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 
 	if (!amdgpu_connector) {
 		DRM_ERROR("Couldn't find encoder's connector\n");
@@ -1276,9 +1241,7 @@ static void dce_v6_0_audio_write_sad_regs(struct drm_encoder *encoder)
 	struct amdgpu_encoder *amdgpu_encoder = to_amdgpu_encoder(encoder);
 	struct amdgpu_encoder_atom_dig *dig = amdgpu_encoder->enc_priv;
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	struct amdgpu_connector *amdgpu_connector = NULL;
 	struct cea_sad *sads;
 	int i, sad_count;
@@ -1298,20 +1261,14 @@ static void dce_v6_0_audio_write_sad_regs(struct drm_encoder *encoder)
 		{ ixAZALIA_F0_CODEC_PIN_CONTROL_AUDIO_DESCRIPTOR13, HDMI_AUDIO_CODING_TYPE_WMA_PRO },
 	};
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		if (connector->encoder == encoder) {
 			amdgpu_connector = to_amdgpu_connector(connector);
 			break;
 		}
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 
 	if (!amdgpu_connector) {
 		DRM_ERROR("Couldn't find encoder's connector\n");
@@ -1700,9 +1657,7 @@ static void dce_v6_0_afmt_setmode(struct drm_encoder *encoder,
 	struct amdgpu_encoder *amdgpu_encoder = to_amdgpu_encoder(encoder);
 	struct amdgpu_encoder_atom_dig *dig = amdgpu_encoder->enc_priv;
 	struct drm_connector *connector;
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	struct drm_connector_list_iter iter;
-#endif
 	struct amdgpu_connector *amdgpu_connector = NULL;
 	int em = amdgpu_atombios_encoder_get_encoder_mode(encoder);
 	int bpc = 8;
@@ -1710,20 +1665,14 @@ static void dce_v6_0_afmt_setmode(struct drm_encoder *encoder,
 	if (!dig || !dig->afmt)
 		return;
 
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_begin(dev, &iter);
 	drm_for_each_connector_iter(connector, &iter) {
-#else
-	list_for_each_entry(connector, &(dev)->mode_config.connector_list, head) {
-#endif
 		if (connector->encoder == encoder) {
 			amdgpu_connector = to_amdgpu_connector(connector);
 			break;
 		}
 	}
-#ifdef HAVE_DRM_CONNECTOR_LIST_ITER_BEGIN
 	drm_connector_list_iter_end(&iter);
-#endif
 
 	if (!amdgpu_connector) {
 		DRM_ERROR("Couldn't find encoder's connector\n");
@@ -1912,11 +1861,7 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 	amdgpu_bo_get_tiling_flags(abo, &tiling_flags);
 	amdgpu_bo_unreserve(abo);
 
-#if !defined(HAVE_DRM_FRAMEBUFFER_FORMAT)
-	switch (target_fb->pixel_format) {
-#else
 	switch (target_fb->format->format) {
-#endif
 	case DRM_FORMAT_C8:
 		fb_format = (GRPH_DEPTH(GRPH_DEPTH_8BPP) |
 			     GRPH_FORMAT(GRPH_FORMAT_INDEXED));
@@ -1992,11 +1937,7 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 		break;
 	default:
 		DRM_ERROR("Unsupported screen format %p4cc\n",
-#if defined(HAVE_DRM_FRAMEBUFFER_FORMAT)
 			  &target_fb->format->format);
-#else
-			  &target_fb->pixel_format);
-#endif
 		return -EINVAL;
 	}
 
@@ -2059,11 +2000,7 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
 	WREG32(mmGRPH_X_END + amdgpu_crtc->crtc_offset, target_fb->width);
 	WREG32(mmGRPH_Y_END + amdgpu_crtc->crtc_offset, target_fb->height);
 
-#if !defined(HAVE_DRM_FRAMEBUFFER_FORMAT)
-	fb_pitch_pixels = target_fb->pitches[0] / (target_fb->bits_per_pixel / 8);
-#else
 	fb_pitch_pixels = target_fb->pitches[0] / target_fb->format->cpp[0];
-#endif
 	WREG32(mmGRPH_PITCH + amdgpu_crtc->crtc_offset, fb_pitch_pixels);
 
 	dce_v6_0_grph_enable(crtc, true);
@@ -2434,12 +2371,6 @@ static void dce_v6_0_cursor_reset(struct drm_crtc *crtc)
 	}
 }
 
-/*
- * TODO: drm_fb_helper_setcmap() prev commit v4.12-rc7-1385-g964c60063bff
- * ("drm/fb-helper: separate the fb_setcmap helper into atomic and legacy paths")
- * don't work as expected.
- */
-#if defined(HAVE_STRUCT_DRM_CRTC_FUNCS_GAMMA_SET_6ARGS)
 static int dce_v6_0_crtc_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green,
 				   u16 *blue, uint32_t size,
 				   struct drm_modeset_acquire_ctx *ctx)
@@ -2448,21 +2379,6 @@ static int dce_v6_0_crtc_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green,
 
 	return 0;
 }
-#elif defined(HAVE_STRUCT_DRM_CRTC_FUNCS_GAMMA_SET_5ARGS)
-static int dce_v6_0_crtc_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green,
-				   u16 *blue, uint32_t size)
-{
-	dce_v6_0_crtc_load_lut(crtc);
-
-	return 0;
-}
-#else
-static void dce_v6_0_crtc_gamma_set(struct drm_crtc *crtc, u16 *red, u16 *green,
-				    u16 *blue, uint32_t start, uint32_t size)
-{
-	dce_v6_0_crtc_load_lut(crtc);
-}
-#endif
 
 static void dce_v6_0_crtc_destroy(struct drm_crtc *crtc)
 {
@@ -2478,11 +2394,7 @@ static const struct drm_crtc_funcs dce_v6_0_crtc_funcs = {
 	.gamma_set = dce_v6_0_crtc_gamma_set,
 	.set_config = amdgpu_display_crtc_set_config,
 	.destroy = dce_v6_0_crtc_destroy,
-#ifdef HAVE_STRUCT_DRM_CRTC_FUNCS_PAGE_FLIP_TARGET
 	.page_flip_target = amdgpu_display_crtc_page_flip_target,
-#else
-	.page_flip = amdgpu_crtc_page_flip,
-#endif
 #ifdef HAVE_STRUCT_DRM_CRTC_FUNCS_GET_VBLANK_TIMESTAMP
 	.get_vblank_counter = amdgpu_get_vblank_counter_kms,
 	.enable_vblank = amdgpu_enable_vblank_kms,
@@ -2777,7 +2689,6 @@ static int dce_v6_0_sw_init(void *handle)
 #ifdef HAVE_DRM_MODE_CONFIG_FB_MODIFIERS_NOT_SUPPORTED
 	adev_to_drm(adev)->mode_config.fb_modifiers_not_supported = true;
 #endif
-	adev_to_drm(adev)->mode_config.fb_base = adev->gmc.aper_base;
 
 	r = amdgpu_display_modeset_create_props(adev);
 	if (r)

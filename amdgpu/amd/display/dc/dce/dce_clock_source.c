@@ -34,6 +34,7 @@
 
 #include "dce_clock_source.h"
 #include "clk_mgr.h"
+#include "dccg.h"
 
 #include "reg_helper.h"
 
@@ -43,7 +44,10 @@
 #define CTX \
 	clk_src->base.ctx
 
-#define DC_LOGGER_INIT()
+#define DC_LOGGER \
+	calc_pll_cs->ctx->logger
+#define DC_LOGGER_INIT() \
+	struct calc_pll_clock_source *calc_pll_cs = &clk_src->calc_pll
 
 #undef FN
 #define FN(reg_name, field_name) \
@@ -920,19 +924,6 @@ static bool dce112_program_pix_clk(
 	struct dce110_clk_src *clk_src = TO_DCE110_CLK_SRC(clock_source);
 	struct bp_pixel_clock_parameters bp_pc_params = {0};
 
-	if (IS_FPGA_MAXIMUS_DC(clock_source->ctx->dce_environment)) {
-		unsigned int inst = pix_clk_params->controller_id - CONTROLLER_ID_D0;
-		unsigned dp_dto_ref_100hz = 7000000;
-		unsigned clock_100hz = pll_settings->actual_pix_clk_100hz;
-
-		/* Set DTO values: phase = target clock, modulo = reference clock */
-		REG_WRITE(PHASE[inst], clock_100hz);
-		REG_WRITE(MODULO[inst], dp_dto_ref_100hz);
-
-		/* Enable DTO */
-		REG_UPDATE(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1);
-		return true;
-	}
 	/* First disable SS
 	 * ATOMBIOS will enable by default SS on PLL for DP,
 	 * do not disable it here
@@ -995,7 +986,6 @@ static bool dcn31_program_pix_clk(
 			REG_WRITE(PHASE[inst], pll_settings->actual_pix_clk_100hz * 100);
 			REG_WRITE(MODULO[inst], dp_dto_ref_khz * 1000);
 		}
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 		/* Enable DTO */
 		if (clk_src->cs_mask->PIPE0_DTO_SRC_SEL)
 			if (encoding == DP_128b_132b_ENCODING)
@@ -1009,39 +999,11 @@ static bool dcn31_program_pix_clk(
 		else
 			REG_UPDATE(PIXEL_RATE_CNTL[inst],
 					DP_DTO0_ENABLE, 1);
-#else
-		REG_UPDATE(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1);
-#endif
 	} else {
-		if (IS_FPGA_MAXIMUS_DC(clock_source->ctx->dce_environment)) {
-			unsigned int inst = pix_clk_params->controller_id - CONTROLLER_ID_D0;
-			unsigned dp_dto_ref_100hz = 7000000;
-			unsigned clock_100hz = pll_settings->actual_pix_clk_100hz;
 
-			/* Set DTO values: phase = target clock, modulo = reference clock */
-			REG_WRITE(PHASE[inst], clock_100hz);
-			REG_WRITE(MODULO[inst], dp_dto_ref_100hz);
-
-			/* Enable DTO */
-	#if defined(CONFIG_DRM_AMD_DC_DCN)
-			if (clk_src->cs_mask->PIPE0_DTO_SRC_SEL)
-				REG_UPDATE_2(PIXEL_RATE_CNTL[inst],
-						DP_DTO0_ENABLE, 1,
-						PIPE0_DTO_SRC_SEL, 1);
-			else
-				REG_UPDATE(PIXEL_RATE_CNTL[inst],
-						DP_DTO0_ENABLE, 1);
-	#else
-			REG_UPDATE(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1);
-	#endif
-			return true;
-		}
-
-#if defined(CONFIG_DRM_AMD_DC_DCN)
 		if (clk_src->cs_mask->PIPE0_DTO_SRC_SEL)
 			REG_UPDATE(PIXEL_RATE_CNTL[inst],
 					PIPE0_DTO_SRC_SEL, 0);
-#endif
 
 		/*ATOMBIOS expects pixel rate adjusted by deep color ratio)*/
 		bp_pc_params.controller_id = pix_clk_params->controller_id;
@@ -1161,6 +1123,7 @@ const struct pixel_rate_range_table_entry video_optimized_pixel_rates[] = {
 	{25170, 25180, 25200, 1000, 1001},	//25.2MHz   ->   25.17
 	{59340, 59350, 59400, 1000, 1001},	//59.4Mhz   ->   59.340
 	{74170, 74180, 74250, 1000, 1001},	//74.25Mhz  ->   74.1758
+	{89910, 90000, 90000, 1000, 1001},	//90Mhz     ->   89.91
 	{125870, 125880, 126000, 1000, 1001},	//126Mhz    ->  125.87
 	{148350, 148360, 148500, 1000, 1001},	//148.5Mhz  ->  148.3516
 	{167830, 167840, 168000, 1000, 1001},	//168Mhz    ->  167.83
@@ -1274,7 +1237,14 @@ static bool dcn3_program_pix_clk(
 			REG_WRITE(PHASE[inst], pll_settings->actual_pix_clk_100hz * 100);
 			REG_WRITE(MODULO[inst], dp_dto_ref_khz * 1000);
 		}
-		REG_UPDATE(PIXEL_RATE_CNTL[inst], DP_DTO0_ENABLE, 1);
+		/* Enable DTO */
+		if (clk_src->cs_mask->PIPE0_DTO_SRC_SEL)
+			REG_UPDATE_2(PIXEL_RATE_CNTL[inst],
+					DP_DTO0_ENABLE, 1,
+					PIPE0_DTO_SRC_SEL, 1);
+		else
+			REG_UPDATE(PIXEL_RATE_CNTL[inst],
+					DP_DTO0_ENABLE, 1);
 	} else
 		// For other signal types(HDMI_TYPE_A, DVI) Driver still to call VBIOS Command table
 		dce112_program_pix_clk(clock_source, pix_clk_params, encoding, pll_settings);
@@ -1288,6 +1258,7 @@ static uint32_t dcn3_get_pix_clk_dividers(
 		struct pll_settings *pll_settings)
 {
 	unsigned long long actual_pix_clk_100Hz = pix_clk_params ? pix_clk_params->requested_pix_clk_100hz : 0;
+	struct dce110_clk_src *clk_src = TO_DCE110_CLK_SRC(cs);
 
 	DC_LOGGER_INIT();
 

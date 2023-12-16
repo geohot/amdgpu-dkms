@@ -24,22 +24,8 @@
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_connector.h>
-#include <kcl/kcl_kref.h>
 #include <kcl/kcl_drm_crtc.h>
-
-/*
- * commit v4.9-rc4-949-g949f08862d66
- * drm: Make the connector .detect() callback optional
- */
-#if DRM_VERSION_CODE < DRM_VERSION(4, 10, 0)
-#define AMDKCL_AMDGPU_DRM_CONNECTOR_STATUS_DETECT_MANDATORY
-#endif
-
-#ifndef HAVE_DRM_CONNECTOR_XXX_DROP_MODE
-#define drm_connector_update_edid_property drm_mode_connector_update_edid_property
-#define drm_connector_attach_encoder drm_mode_connector_attach_encoder
-#define drm_connector_set_path_property drm_mode_connector_set_path_property
-#endif
+#include <kcl/kcl_drm_print.h>
 
 /**
  * drm_connector_for_each_possible_encoder - iterate connector's possible encoders
@@ -74,24 +60,6 @@ int drm_connector_init_with_ddc(struct drm_device *dev,
 }
 #endif
 
-#if !defined(HAVE_DRM_CONNECTOR_PUT)
-static inline void drm_connector_put(struct drm_connector *connector)
-{
-#if defined(HAVE_DRM_CONNECTOR_UNREFERENCE)
-	drm_connector_unreference(NULL);
-#elif defined(HAVE_FREE_CB_IN_STRUCT_DRM_MODE_OBJECT)
-	struct drm_mode_object *obj = &connector->base;
-	if (obj->free_cb) {
-		DRM_DEBUG("OBJ ID: %d (%d)\n", obj->id, kref_read(&obj->refcount));
-		kref_put(&obj->refcount, obj->free_cb);
-	}
-#else
-	pr_warn_once("drm_connector_put is not supported\n");
-#endif
-}
-
-#endif
-
 #ifndef DP_MAX_DOWNSTREAM_PORTS
 #define DP_MAX_DOWNSTREAM_PORTS    0x10
 #endif
@@ -101,24 +69,11 @@ void drm_connector_attach_dp_subconnector_property(struct drm_connector *connect
 void drm_dp_set_subconnector_property(struct drm_connector *connector, enum drm_connector_status status,
 				  const u8 *dpcd, const u8 prot_cap[4]);
 
-#ifdef HAVE_DRM_MODE_SUBCONNECTOR_ENUM
 #define DRM_MODE_SUBCONNECTOR_VGA 1
 #define DRM_MODE_SUBCONNECTOR_DisplayPort 10
 #define DRM_MODE_SUBCONNECTOR_HDMIA 11
 #define DRM_MODE_SUBCONNECTOR_Native 15
 #define DRM_MODE_SUBCONNECTOR_Wireless 18
-#else
-/* Copied from include/uapi/drm/drm_mode.h */
-/* This is for connectors with multiple signal types. */
-/* Try to match DRM_MODE_CONNECTOR_X as closely as possible. */
-enum drm_mode_subconnector {
-	DRM_MODE_SUBCONNECTOR_VGA	  = 1,  /*            DP */
-	DRM_MODE_SUBCONNECTOR_DisplayPort = 10, /*            DP */
-	DRM_MODE_SUBCONNECTOR_HDMIA       = 11, /*            DP */
-	DRM_MODE_SUBCONNECTOR_Native      = 15, /*            DP */
-	DRM_MODE_SUBCONNECTOR_Wireless    = 18, /*            DP */
-};
-#endif /* HAVE_DRM_MODE_SUBCONNECTOR_ENUM */
 #endif /* HAVE_DRM_MODE_CONFIG_DP_SUBCONNECTOR_PROPERTY */
 
 #ifndef HAVE_DRM_CONNECTOR_ATOMIC_HDR_METADATA_EQUAL
@@ -128,16 +83,6 @@ bool drm_connector_atomic_hdr_metadata_equal(struct drm_connector_state *old_sta
 
 #if !defined(HAVE_DRM_CONNECTOR_ATTACH_HDR_OUTPUT_METADATA_PROPERTY)
 int drm_connector_attach_hdr_output_metadata_property(struct drm_connector *connector);
-#endif
-
-#ifndef HAVE_DRM_PANEL_ORIENTATION_ENUM
-enum drm_panel_orientation {
-        DRM_MODE_PANEL_ORIENTATION_UNKNOWN = -1,
-        DRM_MODE_PANEL_ORIENTATION_NORMAL = 0,
-        DRM_MODE_PANEL_ORIENTATION_BOTTOM_UP,
-        DRM_MODE_PANEL_ORIENTATION_LEFT_UP,
-        DRM_MODE_PANEL_ORIENTATION_RIGHT_UP,
-};
 #endif
 
 #ifndef HAVE_DRM_CONNECTOR_SET_PANEL_ORIENTATION_WITH_QUIRK
@@ -156,6 +101,29 @@ int drm_connector_set_panel_orientation_with_quirk(
 }
 #endif
 
+#ifndef HAVE_DRM_CONNECT_ATTACH_COLORSPACE_PROPERTY
+int _kcl_drm_connector_attach_colorspace_property(struct drm_connector *connector);
+#define drm_connector_attach_colorspace_property _kcl_drm_connector_attach_colorspace_property
+#endif /* HAVE_DRM_CONNECT_ATTACH_COLORSPACE_PROPERTY */
+
+#ifndef HAVE_DRM_MODE_CREATE_HDMI_COLORSPACE_PROPERTY_2ARGS
+#define KCL_DRM_MODE_CREATE_COLORSPACE_PROPERTY
+int _kcl_drm_mode_create_hdmi_colorspace_property(struct drm_connector *connector,
+					     u32 supported_colorspaces);
+#define drm_mode_create_hdmi_colorspace_property _kcl_drm_mode_create_hdmi_colorspace_property
+#endif /* HAVE_DRM_MODE_CREATE_HDMI_COLORSPACE_PROPERTY_2ARGS */
+
+#ifndef HAVE_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_2ARGS
+#define KCL_DRM_MODE_CREATE_COLORSPACE_PROPERTY
+int _kcl_drm_mode_create_dp_colorspace_property(struct drm_connector *connector,
+					     u32 supported_colorspaces);
+#define drm_mode_create_dp_colorspace_property _kcl_drm_mode_create_dp_colorspace_property
+#endif /* HAVE_DRM_MODE_CREATE_DP_COLORSPACE_PROPERTY_2ARGS */
+
+#ifdef KCL_DRM_MODE_CREATE_COLORSPACE_PROPERTY
+#define DRM_MODE_COLORIMETRY_COUNT 16
+#endif
+
 #ifndef DRM_COLOR_FORMAT_YCBCR444
 #define DRM_COLOR_FORMAT_YCBCR444      (1<<1)
 #endif
@@ -167,5 +135,31 @@ int drm_connector_set_panel_orientation_with_quirk(
 #ifndef DRM_COLOR_FORMAT_YCBCR420
 #define DRM_COLOR_FORMAT_YCBCR420      (1<<3)
 #endif
+
+/* For Default case, driver will set the colorspace */
+#ifndef DRM_MODE_COLORIMETRY_DEFAULT
+/* For Default case, driver will set the colorspace */
+#define DRM_MODE_COLORIMETRY_DEFAULT			0
+/* CEA 861 Normal Colorimetry options */
+#define DRM_MODE_COLORIMETRY_NO_DATA			0
+#define DRM_MODE_COLORIMETRY_SMPTE_170M_YCC		1
+#define DRM_MODE_COLORIMETRY_BT709_YCC			2
+/* CEA 861 Extended Colorimetry Options */
+#define DRM_MODE_COLORIMETRY_XVYCC_601			3
+#define DRM_MODE_COLORIMETRY_XVYCC_709			4
+#define DRM_MODE_COLORIMETRY_SYCC_601			5
+#define DRM_MODE_COLORIMETRY_OPYCC_601			6
+#define DRM_MODE_COLORIMETRY_OPRGB			7
+#define DRM_MODE_COLORIMETRY_BT2020_CYCC		8
+#define DRM_MODE_COLORIMETRY_BT2020_RGB			9
+#define DRM_MODE_COLORIMETRY_BT2020_YCC			10
+/* Additional Colorimetry extension added as part of CTA 861.G */
+#define DRM_MODE_COLORIMETRY_DCI_P3_RGB_D65		11
+#define DRM_MODE_COLORIMETRY_DCI_P3_RGB_THEATER		12
+/* Additional Colorimetry Options added for DP 1.4a VSC Colorimetry Format */
+#define DRM_MODE_COLORIMETRY_RGB_WIDE_FIXED		13
+#define DRM_MODE_COLORIMETRY_RGB_WIDE_FLOAT		14
+#define DRM_MODE_COLORIMETRY_BT601_YCC			15
+#endif /* DRM_MODE_COLORIMETRY_DEFAULT */
 
 #endif /* AMDKCL_DRM_CONNECTOR_H */
