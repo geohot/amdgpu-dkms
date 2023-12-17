@@ -50,7 +50,7 @@
 #include "dcn32/dcn32_optc.h"
 #include "dcn20/dcn20_hwseq.h"
 #include "dcn30/dcn30_hwseq.h"
-#include "dce110/dce110_hw_sequencer.h"
+#include "dce110/dce110_hwseq.h"
 #include "dcn30/dcn30_opp.h"
 #include "dcn20/dcn20_dsc.h"
 #include "dcn30/dcn30_vpg.h"
@@ -434,7 +434,6 @@ static const struct dcn30_mmhubbub_mask mcif_wb30_mask = {
 #define dsc_regsDCN20_init(id)\
 	DSC_REG_LIST_DCN20_RI(id)
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 static struct dcn20_dsc_registers dsc_regs[4];
 
 static const struct dcn20_dsc_shift dsc_shift = {
@@ -444,7 +443,6 @@ static const struct dcn20_dsc_shift dsc_shift = {
 static const struct dcn20_dsc_mask dsc_mask = {
 	DSC_REG_LIST_SH_MASK_DCN20(_MASK)
 };
-#endif
 static struct dcn30_mpc_registers mpc_regs;
 #define dcn_mpc_regs_init()\
 	MPC_REG_LIST_DCN3_2_RI(0),\
@@ -656,8 +654,6 @@ static const struct resource_caps res_cap_dcn321 = {
 
 static const struct dc_plane_cap plane_cap = {
 	.type = DC_PLANE_TYPE_DCN_UNIVERSAL,
-	.blends_with_above = true,
-	.blends_with_below = true,
 	.per_pixel_alpha = true,
 
 	.pixel_format_support = {
@@ -725,30 +721,17 @@ static const struct dc_debug_options debug_defaults_drv = {
 	.alloc_extra_way_for_cursor = true,
 	.min_prefetch_in_strobe_ns = 60000, // 60us
 	.disable_unbounded_requesting = false,
+	.override_dispclk_programming = true,
+	.disable_fpo_optimizations = false,
+	.fpo_vactive_margin_us = 2000, // 2000us
+	.disable_fpo_vactive = false,
+	.disable_boot_optimizations = false,
+	.disable_subvp_high_refresh = false,
+	.fpo_vactive_min_active_margin_us = 200,
+	.fpo_vactive_max_blank_us = 1000,
+	.enable_legacy_fast_update = false,
+	.disable_dc_mode_overwrite = true,
 };
-
-static const struct dc_debug_options debug_defaults_diags = {
-	.disable_dmcu = true,
-	.force_abm_enable = false,
-	.timing_trace = true,
-	.clock_trace = true,
-	.disable_dpp_power_gate = true,
-	.disable_hubp_power_gate = true,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
-	.disable_dsc_power_gate = true,
-#endif
-	.disable_clock_gate = true,
-	.disable_pplib_clock_request = true,
-	.disable_pplib_wm_range = true,
-	.disable_stutter = false,
-	.scl_reset_length10 = true,
-	.dwb_fi_phase = -1, // -1 = disable
-	.dmub_command_table = true,
-	.enable_tri_buf = true,
-	.use_max_lb = true,
-	.force_disable_subvp = true,
-};
-
 
 static struct dce_aux *dcn321_aux_engine_create(
 	struct dc_context *ctx,
@@ -1340,15 +1323,6 @@ static const struct resource_create_funcs res_create_funcs = {
 	.create_hwseq = dcn321_hwseq_create,
 };
 
-static const struct resource_create_funcs res_create_maximus_funcs = {
-	.read_dce_straps = NULL,
-	.create_audio = NULL,
-	.create_stream_encoder = NULL,
-	.create_hpo_dp_stream_encoder = dcn321_hpo_dp_stream_encoder_create,
-	.create_hpo_dp_link_encoder = dcn321_hpo_dp_link_encoder_create,
-	.create_hwseq = dcn321_hwseq_create,
-};
-
 static void dcn321_resource_destruct(struct dcn321_resource_pool *pool)
 {
 	unsigned int i;
@@ -1390,12 +1364,10 @@ static void dcn321_resource_destruct(struct dcn321_resource_pool *pool)
 		}
 	}
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		if (pool->base.dscs[i] != NULL)
 			dcn20_dsc_destroy(&pool->base.dscs[i]);
 	}
-#endif
 	if (pool->base.mpc != NULL) {
 		kfree(TO_DCN20_MPC(pool->base.mpc));
 		pool->base.mpc = NULL;
@@ -1495,8 +1467,11 @@ static void dcn321_resource_destruct(struct dcn321_resource_pool *pool)
 	if (pool->base.dccg != NULL)
 		dcn_dccg_destroy(&pool->base.dccg);
 
-	if (pool->base.oem_device != NULL)
-		link_destroy_ddc_service(&pool->base.oem_device);
+	if (pool->base.oem_device != NULL) {
+		struct dc *dc = pool->base.oem_device->ctx->dc;
+
+		dc->link_srv->destroy_ddc_service(&pool->base.oem_device);
+	}
 }
 
 
@@ -1557,7 +1532,7 @@ static bool dcn321_mmhubbub_create(struct dc_context *ctx, struct resource_pool 
 	}
 	return true;
 }
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
+
 static struct display_stream_compressor *dcn321_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
@@ -1582,7 +1557,7 @@ static struct display_stream_compressor *dcn321_dsc_create(
 
 	return &dsc->base;
 }
-#endif
+
 static void dcn321_destroy_resource_pool(struct resource_pool **pool)
 {
 	struct dcn321_resource_pool *dcn321_pool = TO_DCN321_RES_POOL(*pool);
@@ -1611,11 +1586,11 @@ static struct resource_funcs dcn321_res_pool_funcs = {
 	.validate_bandwidth = dcn32_validate_bandwidth,
 	.calculate_wm_and_dlg = dcn32_calculate_wm_and_dlg,
 	.populate_dml_pipes = dcn32_populate_dml_pipes_from_context,
-	.acquire_idle_pipe_for_head_pipe_in_layer = dcn32_acquire_idle_pipe_for_head_pipe_in_layer,
+	.acquire_free_pipe_as_secondary_dpp_pipe = dcn32_acquire_free_pipe_as_secondary_dpp_pipe,
+	.acquire_free_pipe_as_secondary_opp_head = dcn32_acquire_free_pipe_as_secondary_opp_head,
+	.release_pipe = dcn20_release_pipe,
 	.add_stream_to_ctx = dcn30_add_stream_to_ctx,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	.add_dsc_to_stream_resource = dcn20_add_dsc_to_stream_resource,
-#endif
 	.remove_stream_from_ctx = dcn20_remove_stream_from_ctx,
 	.populate_dml_writeback_from_context = dcn30_populate_dml_writeback_from_context,
 	.set_mcif_arb_params = dcn30_set_mcif_arb_params,
@@ -1631,6 +1606,14 @@ static struct resource_funcs dcn321_res_pool_funcs = {
 	.save_mall_state = dcn32_save_mall_state,
 	.restore_mall_state = dcn32_restore_mall_state,
 };
+
+static uint32_t read_pipe_fuses(struct dc_context *ctx)
+{
+	uint32_t value = REG_READ(CC_DC_PIPE_DIS);
+	/* DCN321 support max 4 pipes */
+	value = value & 0xf;
+	return value;
+}
 
 
 static bool dcn321_resource_construct(
@@ -1674,7 +1657,7 @@ static bool dcn321_resource_construct(
 	pool->base.res_cap = &res_cap_dcn321;
 	/* max number of pipes for ASIC before checking for pipe fuses */
 	num_pipes  = pool->base.res_cap->num_timing_generator;
-	pipe_fuses = REG_READ(CC_DC_PIPE_DIS);
+	pipe_fuses = read_pipe_fuses(ctx);
 
 	for (i = 0; i < pool->base.res_cap->num_timing_generator; i++)
 		if (pipe_fuses & 1 << i)
@@ -1727,9 +1710,9 @@ static bool dcn321_resource_construct(
 	dc->caps.subvp_pstate_allow_width_us = 20;
 	dc->caps.subvp_vertical_int_margin_us = 30;
 	dc->caps.subvp_drr_vblank_start_margin_us = 100; // 100us margin
-	dc->caps.max_slave_planes = 1;
-	dc->caps.max_slave_yuv_planes = 1;
-	dc->caps.max_slave_rgb_planes = 1;
+	dc->caps.max_slave_planes = 2;
+	dc->caps.max_slave_yuv_planes = 2;
+	dc->caps.max_slave_rgb_planes = 2;
 	dc->caps.post_blend_color_processing = true;
 	dc->caps.force_dp_tps4_for_cp2520 = true;
 	dc->caps.dp_hpo = true;
@@ -1737,6 +1720,7 @@ static bool dcn321_resource_construct(
 	dc->caps.edp_dsc_support = true;
 	dc->caps.extended_aux_timeout_support = true;
 	dc->caps.dmcub_support = true;
+	dc->caps.max_v_total = (1 << 15) - 1;
 
 	/* Color pipeline capabilities */
 	dc->caps.color.dpp.dcn_arch = 1;
@@ -1772,6 +1756,7 @@ static bool dcn321_resource_construct(
 	dc->caps.color.mpc.ogam_rom_caps.hlg = 0;
 	dc->caps.color.mpc.ocsc = 1;
 
+	dc->config.dc_mode_clk_limit_support = true;
 	/* read VBIOS LTTPR caps */
 	{
 		if (ctx->dc_bios->funcs->get_lttpr_caps) {
@@ -1790,10 +1775,7 @@ static bool dcn321_resource_construct(
 
 	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
-	else if (dc->ctx->dce_environment == DCE_ENV_FPGA_MAXIMUS) {
-		dc->debug = debug_defaults_diags;
-	} else
-		dc->debug = debug_defaults_diags;
+
 	// Init the vm_helper
 	if (dc->vm_helper)
 		vm_helper_init(dc->vm_helper, 16);
@@ -1849,8 +1831,7 @@ static bool dcn321_resource_construct(
 	}
 
 	/* DML */
-	if (!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment))
-		dml_init_instance(&dc->dml, &dcn3_21_soc, &dcn3_21_ip, DML_PROJECT_DCN32);
+	dml_init_instance(&dc->dml, &dcn3_21_soc, &dcn3_21_ip, DML_PROJECT_DCN32);
 
 	/* IRQ Service */
 	init_data.ctx = dc->ctx;
@@ -1936,7 +1917,7 @@ static bool dcn321_resource_construct(
 		dm_error("DC: failed to create mpc!\n");
 		goto create_fail;
 	}
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
+
 	/* DSCs */
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		pool->base.dscs[i] = dcn321_dsc_create(ctx, i);
@@ -1946,7 +1927,7 @@ static bool dcn321_resource_construct(
 			goto create_fail;
 		}
 	}
-#endif
+
 	/* DWB */
 	if (!dcn321_dwbc_create(ctx, &pool->base)) {
 		BREAK_TO_DEBUGGER();
@@ -1982,9 +1963,8 @@ static bool dcn321_resource_construct(
 
 	/* Audio, HWSeq, Stream Encoders including HPO and virtual, MPC 3D LUTs */
 	if (!resource_construct(num_virtual_links, dc, &pool->base,
-			(!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment) ?
-			&res_create_funcs : &res_create_maximus_funcs)))
-			goto create_fail;
+			&res_create_funcs))
+		goto create_fail;
 
 	/* HW Sequencer init functions and Plane caps */
 	dcn32_hw_sequencer_init_functions(dc);
@@ -2002,10 +1982,51 @@ static bool dcn321_resource_construct(
 		ddc_init_data.id.id = dc->ctx->dc_bios->fw_info.oem_i2c_obj_id;
 		ddc_init_data.id.enum_id = 0;
 		ddc_init_data.id.type = OBJECT_TYPE_GENERIC;
-		pool->base.oem_device = link_create_ddc_service(&ddc_init_data);
+		pool->base.oem_device = dc->link_srv->create_ddc_service(&ddc_init_data);
 	} else {
 		pool->base.oem_device = NULL;
 	}
+
+	dc->dml2_options.dcn_pipe_count = pool->base.pipe_count;
+	dc->dml2_options.use_native_pstate_optimization = false;
+	dc->dml2_options.use_native_soc_bb_construction = true;
+	dc->dml2_options.minimize_dispclk_using_odm = true;
+
+	dc->dml2_options.callbacks.dc = dc;
+	dc->dml2_options.callbacks.build_scaling_params = &resource_build_scaling_params;
+	dc->dml2_options.callbacks.can_support_mclk_switch_using_fw_based_vblank_stretch = &dcn30_can_support_mclk_switch_using_fw_based_vblank_stretch;
+	dc->dml2_options.callbacks.acquire_secondary_pipe_for_mpc_odm = &dc_resource_acquire_secondary_pipe_for_mpc_odm_legacy;
+
+	dc->dml2_options.svp_pstate.callbacks.dc = dc;
+	dc->dml2_options.svp_pstate.callbacks.add_plane_to_context = &dc_add_plane_to_context;
+	dc->dml2_options.svp_pstate.callbacks.add_stream_to_ctx = &dc_add_stream_to_ctx;
+	dc->dml2_options.svp_pstate.callbacks.build_scaling_params = &resource_build_scaling_params;
+	dc->dml2_options.svp_pstate.callbacks.create_plane = &dc_create_plane_state;
+	dc->dml2_options.svp_pstate.callbacks.remove_plane_from_context = &dc_remove_plane_from_context;
+	dc->dml2_options.svp_pstate.callbacks.remove_stream_from_ctx = &dc_remove_stream_from_ctx;
+	dc->dml2_options.svp_pstate.callbacks.create_stream_for_sink = &dc_create_stream_for_sink;
+	dc->dml2_options.svp_pstate.callbacks.plane_state_release = &dc_plane_state_release;
+	dc->dml2_options.svp_pstate.callbacks.stream_release = &dc_stream_release;
+	dc->dml2_options.svp_pstate.callbacks.release_dsc = &dcn20_release_dsc;
+
+	dc->dml2_options.svp_pstate.subvp_fw_processing_delay_us = dc->caps.subvp_fw_processing_delay_us;
+	dc->dml2_options.svp_pstate.subvp_prefetch_end_to_mall_start_us = dc->caps.subvp_prefetch_end_to_mall_start_us;
+	dc->dml2_options.svp_pstate.subvp_pstate_allow_width_us = dc->caps.subvp_pstate_allow_width_us;
+	dc->dml2_options.svp_pstate.subvp_swath_height_margin_lines = dc->caps.subvp_swath_height_margin_lines;
+
+	dc->dml2_options.svp_pstate.force_disable_subvp = dc->debug.force_disable_subvp;
+	dc->dml2_options.svp_pstate.force_enable_subvp = dc->debug.force_subvp_mclk_switch;
+
+	dc->dml2_options.mall_cfg.cache_line_size_bytes = dc->caps.cache_line_size;
+	dc->dml2_options.mall_cfg.cache_num_ways = dc->caps.cache_num_ways;
+	dc->dml2_options.mall_cfg.max_cab_allocation_bytes = dc->caps.max_cab_allocation_bytes;
+	dc->dml2_options.mall_cfg.mblk_height_4bpe_pixels = DCN3_2_MBLK_HEIGHT_4BPE;
+	dc->dml2_options.mall_cfg.mblk_height_8bpe_pixels = DCN3_2_MBLK_HEIGHT_8BPE;
+	dc->dml2_options.mall_cfg.mblk_size_bytes = DCN3_2_MALL_MBLK_SIZE_BYTES;
+	dc->dml2_options.mall_cfg.mblk_width_pixels = DCN3_2_MBLK_WIDTH;
+
+	dc->dml2_options.max_segments_per_hubp = 18;
+	dc->dml2_options.det_segment_size = DCN3_2_DET_SEG_SIZE;
 
 	return true;
 

@@ -130,9 +130,7 @@ struct crc_params {
 
 	enum crc_selection selection;
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	uint8_t dsc_mode;
-#endif
 	uint8_t odm_mode;
 
 	bool continuous_mode;
@@ -184,7 +182,7 @@ struct timing_generator_funcs {
 
 	bool (*enable_crtc)(struct timing_generator *tg);
 	bool (*disable_crtc)(struct timing_generator *tg);
-#ifdef CONFIG_DRM_AMD_DC_DCN
+#ifdef CONFIG_DRM_AMD_DC_FP
 	void (*phantom_crtc_post_enable)(struct timing_generator *tg);
 #endif
 	void (*disable_phantom_crtc)(struct timing_generator *tg);
@@ -311,6 +309,7 @@ struct timing_generator_funcs {
 	 */
 	void (*set_odm_combine)(struct timing_generator *optc, int *opp_id, int opp_cnt,
 			struct dc_crtc_timing *timing);
+	void (*get_odm_combine_segments)(struct timing_generator *tg, int *odm_segments);
 	void (*set_h_timing_div_manual_mode)(struct timing_generator *optc, bool manual_mode);
 	void (*set_gsl)(struct timing_generator *optc, const struct gsl_params *params);
 	void (*set_gsl_source_select)(struct timing_generator *optc,

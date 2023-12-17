@@ -23,10 +23,10 @@
  *
  */
 
-#include "dce110/dce110_hw_sequencer.h"
-#include "dcn10/dcn10_hw_sequencer.h"
+#include "dce110/dce110_hwseq.h"
+#include "dcn10/dcn10_hwseq.h"
 #include "dcn20/dcn20_hwseq.h"
-#include "dcn201_hwseq.h"
+#include "dcn201/dcn201_hwseq.h"
 #include "dcn201_init.h"
 
 static const struct hw_sequencer_funcs dcn201_funcs = {
@@ -91,7 +91,7 @@ static const struct hw_sequencer_funcs dcn201_funcs = {
 	.enable_dp_link_output = dce110_enable_dp_link_output,
 	.disable_link_output = dce110_disable_link_output,
 	.set_disp_pattern_generator = dcn20_set_disp_pattern_generator,
-	.update_visual_confirm_color = dcn20_update_visual_confirm_color,
+	.update_visual_confirm_color = dcn10_update_visual_confirm_color,
 };
 
 static const struct hwseq_private_funcs dcn201_private_funcs = {

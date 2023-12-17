@@ -45,14 +45,12 @@
 #include "irq/dcn20/irq_service_dcn20.h"
 #include "dcn20_dpp.h"
 #include "dcn20_optc.h"
-#include "dcn20_hwseq.h"
-#include "dce110/dce110_hw_sequencer.h"
+#include "dcn20/dcn20_hwseq.h"
+#include "dce110/dce110_hwseq.h"
 #include "dcn10/dcn10_resource.h"
 #include "dcn20_opp.h"
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 #include "dcn20_dsc.h"
-#endif
 
 #include "dcn20_link_encoder.h"
 #include "dcn20_stream_encoder.h"
@@ -623,7 +621,6 @@ static int map_transmitter_id_to_phy_instance(
 	}
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 #define dsc_regsDCN20(id)\
 [id] = {\
 	DSC_REG_LIST_DCN20(id)\
@@ -645,7 +642,6 @@ static const struct dcn20_dsc_shift dsc_shift = {
 static const struct dcn20_dsc_mask dsc_mask = {
 	DSC_REG_LIST_SH_MASK_DCN20(_MASK)
 };
-#endif
 
 static const struct dccg_registers dccg_regs = {
 		DCCG_REG_LIST_DCN2()
@@ -669,15 +665,11 @@ static const struct resource_caps res_cap_nv10 = {
 		.num_dwb = 1,
 		.num_ddc = 6,
 		.num_vmid = 16,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 		.num_dsc = 6,
-#endif
 };
 
 static const struct dc_plane_cap plane_cap = {
 	.type = DC_PLANE_TYPE_DCN_UNIVERSAL,
-	.blends_with_above = true,
-	.blends_with_below = true,
 	.per_pixel_alpha = true,
 
 	.pixel_format_support = {
@@ -711,9 +703,7 @@ static const struct resource_caps res_cap_nv14 = {
 		.num_dwb = 1,
 		.num_ddc = 5,
 		.num_vmid = 16,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 		.num_dsc = 5,
-#endif
 };
 
 static const struct dc_debug_options debug_defaults_drv = {
@@ -732,22 +722,7 @@ static const struct dc_debug_options debug_defaults_drv = {
 		.scl_reset_length10 = true,
 		.sanity_checks = false,
 		.underflow_assert_delay_us = 0xFFFFFFFF,
-};
-
-static const struct dc_debug_options debug_defaults_diags = {
-		.disable_dmcu = false,
-		.force_abm_enable = false,
-		.timing_trace = true,
-		.clock_trace = true,
-		.disable_dpp_power_gate = true,
-		.disable_hubp_power_gate = true,
-		.disable_clock_gate = true,
-		.disable_pplib_clock_request = true,
-		.disable_pplib_wm_range = true,
-		.disable_stutter = true,
-		.scl_reset_length10 = true,
-		.underflow_assert_delay_us = 0xFFFFFFFF,
-		.enable_tri_buf = true,
+		.enable_legacy_fast_update = true,
 };
 
 void dcn20_dpp_destroy(struct dpp **dpp)
@@ -1076,13 +1051,6 @@ static const struct resource_create_funcs res_create_funcs = {
 	.create_hwseq = dcn20_hwseq_create,
 };
 
-static const struct resource_create_funcs res_create_maximus_funcs = {
-	.read_dce_straps = NULL,
-	.create_audio = NULL,
-	.create_stream_encoder = NULL,
-	.create_hwseq = dcn20_hwseq_create,
-};
-
 static void dcn20_pp_smu_destroy(struct pp_smu_funcs **pp_smu);
 
 void dcn20_clock_source_destroy(struct clock_source **clk_src)
@@ -1091,7 +1059,6 @@ void dcn20_clock_source_destroy(struct clock_source **clk_src)
 	*clk_src = NULL;
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 struct display_stream_compressor *dcn20_dsc_create(
 	struct dc_context *ctx, uint32_t inst)
 {
@@ -1112,7 +1079,6 @@ void dcn20_dsc_destroy(struct display_stream_compressor **dsc)
 	kfree(container_of(*dsc, struct dcn20_dsc, base));
 	*dsc = NULL;
 }
-#endif
 
 static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 {
@@ -1125,12 +1091,10 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 		}
 	}
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		if (pool->base.dscs[i] != NULL)
 			dcn20_dsc_destroy(&pool->base.dscs[i]);
 	}
-#endif
 
 	if (pool->base.mpc != NULL) {
 		kfree(TO_DCN20_MPC(pool->base.mpc));
@@ -1223,8 +1187,11 @@ static void dcn20_resource_destruct(struct dcn20_resource_pool *pool)
 	if (pool->base.pp_smu != NULL)
 		dcn20_pp_smu_destroy(&pool->base.pp_smu);
 
-	if (pool->base.oem_device != NULL)
-		link_destroy_ddc_service(&pool->base.oem_device);
+	if (pool->base.oem_device != NULL) {
+		struct dc *dc = pool->base.oem_device->ctx->dc;
+
+		dc->link_srv->destroy_ddc_service(&pool->base.oem_device);
+	}
 }
 
 struct hubp *dcn20_hubp_create(
@@ -1325,7 +1292,7 @@ static enum dc_status build_pipe_hw_param(struct pipe_ctx *pipe_ctx)
 enum dc_status dcn20_build_mapped_resource(const struct dc *dc, struct dc_state *context, struct dc_stream_state *stream)
 {
 	enum dc_status status = DC_OK;
-	struct pipe_ctx *pipe_ctx = resource_get_head_pipe_for_stream(&context->res_ctx, stream);
+	struct pipe_ctx *pipe_ctx = resource_get_otg_master_for_stream(&context->res_ctx, stream);
 
 	if (!pipe_ctx)
 		return DC_ERROR_UNEXPECTED;
@@ -1336,7 +1303,6 @@ enum dc_status dcn20_build_mapped_resource(const struct dc *dc, struct dc_state 
 	return status;
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 void dcn20_acquire_dsc(const struct dc *dc,
 			struct resource_context *res_ctx,
 			struct display_stream_compressor **dsc,
@@ -1441,7 +1407,6 @@ static enum dc_status remove_dsc_from_stream_resource(struct dc *dc,
 	else
 		return DC_OK;
 }
-#endif
 
 enum dc_status dcn20_add_stream_to_ctx(struct dc *dc, struct dc_state *new_ctx, struct dc_stream_state *dc_stream)
 {
@@ -1452,11 +1417,9 @@ enum dc_status dcn20_add_stream_to_ctx(struct dc *dc, struct dc_state *new_ctx, 
 	if (result == DC_OK)
 		result = resource_map_phy_clock_resources(dc, new_ctx, dc_stream);
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	/* Get a DSC if required and available */
 	if (result == DC_OK && dc_stream->timing.flags.DSC)
 		result = dcn20_add_dsc_to_stream_resource(dc, new_ctx, dc_stream);
-#endif
 
 	if (result == DC_OK)
 		result = dcn20_build_mapped_resource(dc, new_ctx, dc_stream);
@@ -1469,9 +1432,7 @@ enum dc_status dcn20_remove_stream_from_ctx(struct dc *dc, struct dc_state *new_
 {
 	enum dc_status result = DC_OK;
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	result = remove_dsc_from_stream_resource(dc, new_ctx, dc_stream);
-#endif
 
 	return result;
 }
@@ -1510,9 +1471,7 @@ bool dcn20_split_stream_for_odm(
 	next_odm_pipe->plane_res.xfm = pool->transforms[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.dpp = pool->dpps[next_odm_pipe->pipe_idx];
 	next_odm_pipe->plane_res.mpcc_inst = pool->dpps[next_odm_pipe->pipe_idx]->inst;
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	next_odm_pipe->stream_res.dsc = NULL;
-#endif
 	if (prev_odm_pipe->next_odm_pipe && prev_odm_pipe->next_odm_pipe != next_odm_pipe) {
 		next_odm_pipe->next_odm_pipe = prev_odm_pipe->next_odm_pipe;
 		next_odm_pipe->next_odm_pipe->prev_odm_pipe = next_odm_pipe;
@@ -1568,15 +1527,12 @@ bool dcn20_split_stream_for_odm(
 		next_odm_pipe->stream_res.opp = pool->opps[next_odm_pipe->pipe_idx];
 	else
 		next_odm_pipe->stream_res.opp = next_odm_pipe->top_pipe->stream_res.opp;
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	if (next_odm_pipe->stream->timing.flags.DSC == 1 && !next_odm_pipe->top_pipe) {
 		dcn20_acquire_dsc(dc, res_ctx, &next_odm_pipe->stream_res.dsc, next_odm_pipe->pipe_idx);
 		ASSERT(next_odm_pipe->stream_res.dsc);
 		if (next_odm_pipe->stream_res.dsc == NULL)
 			return false;
 	}
-#endif
-
 	return true;
 }
 
@@ -1599,9 +1555,7 @@ void dcn20_split_stream_for_mpc(
 	secondary_pipe->plane_res.xfm = pool->transforms[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.dpp = pool->dpps[secondary_pipe->pipe_idx];
 	secondary_pipe->plane_res.mpcc_inst = pool->dpps[secondary_pipe->pipe_idx]->inst;
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	secondary_pipe->stream_res.dsc = NULL;
-#endif
 	if (primary_pipe->bottom_pipe && primary_pipe->bottom_pipe != secondary_pipe) {
 		ASSERT(!secondary_pipe->bottom_pipe);
 		secondary_pipe->bottom_pipe = primary_pipe->bottom_pipe;
@@ -1694,7 +1648,6 @@ void dcn20_set_mcif_arb_params(
 	}
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 {
 	int i;
@@ -1729,7 +1682,6 @@ bool dcn20_validate_dsc(struct dc *dc, struct dc_state *new_ctx)
 	}
 	return true;
 }
-#endif
 
 struct pipe_ctx *dcn20_find_secondary_pipe(struct dc *dc,
 		struct resource_context *res_ctx,
@@ -1833,10 +1785,8 @@ void dcn20_merge_pipes_for_validate(
 			odm_pipe->bottom_pipe = NULL;
 			odm_pipe->prev_odm_pipe = NULL;
 			odm_pipe->next_odm_pipe = NULL;
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 			if (odm_pipe->stream_res.dsc)
 				dcn20_release_dsc(&context->res_ctx, dc->res_pool, &odm_pipe->stream_res.dsc);
-#endif
 			/* Clear plane_res and stream_res */
 			memset(&odm_pipe->plane_res, 0, sizeof(odm_pipe->plane_res));
 			memset(&odm_pipe->stream_res, 0, sizeof(odm_pipe->stream_res));
@@ -1991,7 +1941,7 @@ int dcn20_validate_apply_pipe_split_flags(
 			v->ODMCombineEnablePerState[vlevel][pipe_plane];
 
 		if (v->ODMCombineEnabled[pipe_plane] == dm_odm_combine_mode_disabled) {
-			if (get_num_mpc_splits(pipe) == 1) {
+			if (resource_get_mpc_slice_count(pipe) == 2) {
 				/*If need split for mpc but 2 way split already*/
 				if (split[i] == 4)
 					split[i] = 2; /* 2 -> 4 MPC */
@@ -1999,7 +1949,7 @@ int dcn20_validate_apply_pipe_split_flags(
 					split[i] = 0; /* 2 -> 2 MPC */
 				else if (pipe->top_pipe && pipe->top_pipe->plane_state == pipe->plane_state)
 					merge[i] = true; /* 2 -> 1 MPC */
-			} else if (get_num_mpc_splits(pipe) == 3) {
+			} else if (resource_get_mpc_slice_count(pipe) == 4) {
 				/*If need split for mpc but 4 way split already*/
 				if (split[i] == 2 && ((pipe->top_pipe && !pipe->top_pipe->top_pipe)
 						|| !pipe->bottom_pipe)) {
@@ -2008,7 +1958,7 @@ int dcn20_validate_apply_pipe_split_flags(
 						pipe->top_pipe->plane_state == pipe->plane_state)
 					merge[i] = true; /* 4 -> 1 MPC */
 				split[i] = 0;
-			} else if (get_num_odm_splits(pipe)) {
+			} else if (resource_get_odm_slice_count(pipe) > 1) {
 				/* ODM -> MPC transition */
 				if (pipe->prev_odm_pipe) {
 					split[i] = 0;
@@ -2016,7 +1966,7 @@ int dcn20_validate_apply_pipe_split_flags(
 				}
 			}
 		} else {
-			if (get_num_odm_splits(pipe) == 1) {
+			if (resource_get_odm_slice_count(pipe) == 2) {
 				/*If need split for odm but 2 way split already*/
 				if (split[i] == 4)
 					split[i] = 2; /* 2 -> 4 ODM */
@@ -2026,7 +1976,7 @@ int dcn20_validate_apply_pipe_split_flags(
 					ASSERT(0); /* NOT expected yet */
 					merge[i] = true; /* exit ODM */
 				}
-			} else if (get_num_odm_splits(pipe) == 3) {
+			} else if (resource_get_odm_slice_count(pipe) == 4) {
 				/*If need split for odm but 4 way split already*/
 				if (split[i] == 2 && ((pipe->prev_odm_pipe && !pipe->prev_odm_pipe->prev_odm_pipe)
 						|| !pipe->next_odm_pipe)) {
@@ -2036,7 +1986,7 @@ int dcn20_validate_apply_pipe_split_flags(
 					merge[i] = true; /* exit ODM */
 				}
 				split[i] = 0;
-			} else if (get_num_mpc_splits(pipe)) {
+			} else if (resource_get_mpc_slice_count(pipe) > 1) {
 				/* MPC -> ODM transition */
 				ASSERT(0); /* NOT expected yet */
 				if (pipe->top_pipe && pipe->top_pipe->plane_state == pipe->plane_state) {
@@ -2161,14 +2111,12 @@ bool dcn20_fast_validate_bw(
 			ASSERT(0);
 		}
 	}
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	/* Actual dsc count per stream dsc validation*/
 	if (!dcn20_validate_dsc(dc, context)) {
 		context->bw_ctx.dml.vba.ValidationStatus[context->bw_ctx.dml.vba.soc.num_states] =
 				DML_FAIL_DSC_VALIDATION_FAILURE;
 		goto validate_fail;
 	}
-#endif
 
 	*vlevel_out = vlevel;
 
@@ -2186,37 +2134,45 @@ bool dcn20_validate_bandwidth(struct dc *dc, struct dc_state *context,
 		bool fast_validate)
 {
 	bool voltage_supported;
+	display_e2e_pipe_params_st *pipes;
+
+	pipes = kcalloc(dc->res_pool->pipe_count, sizeof(display_e2e_pipe_params_st), GFP_KERNEL);
+	if (!pipes)
+		return false;
+
 	DC_FP_START();
-	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, fast_validate);
+	voltage_supported = dcn20_validate_bandwidth_fp(dc, context, fast_validate, pipes);
 	DC_FP_END();
+
+	kfree(pipes);
 	return voltage_supported;
 }
 
-struct pipe_ctx *dcn20_acquire_idle_pipe_for_layer(
-		struct dc_state *state,
+struct pipe_ctx *dcn20_acquire_free_pipe_for_layer(
+		const struct dc_state *cur_ctx,
+		struct dc_state *new_ctx,
 		const struct resource_pool *pool,
-		struct dc_stream_state *stream)
+		const struct pipe_ctx *opp_head)
 {
-	struct resource_context *res_ctx = &state->res_ctx;
-	struct pipe_ctx *head_pipe = resource_get_head_pipe_for_stream(res_ctx, stream);
-	struct pipe_ctx *idle_pipe = find_idle_secondary_pipe(res_ctx, pool, head_pipe);
+	struct resource_context *res_ctx = &new_ctx->res_ctx;
+	struct pipe_ctx *otg_master = resource_get_otg_master_for_stream(res_ctx, opp_head->stream);
+	struct pipe_ctx *sec_dpp_pipe = resource_find_free_secondary_pipe_legacy(res_ctx, pool, otg_master);
 
-	if (!head_pipe)
-		ASSERT(0);
+	ASSERT(otg_master);
 
-	if (!idle_pipe)
+	if (!sec_dpp_pipe)
 		return NULL;
 
-	idle_pipe->stream = head_pipe->stream;
-	idle_pipe->stream_res.tg = head_pipe->stream_res.tg;
-	idle_pipe->stream_res.opp = head_pipe->stream_res.opp;
+	sec_dpp_pipe->stream = opp_head->stream;
+	sec_dpp_pipe->stream_res.tg = opp_head->stream_res.tg;
+	sec_dpp_pipe->stream_res.opp = opp_head->stream_res.opp;
 
-	idle_pipe->plane_res.hubp = pool->hubps[idle_pipe->pipe_idx];
-	idle_pipe->plane_res.ipp = pool->ipps[idle_pipe->pipe_idx];
-	idle_pipe->plane_res.dpp = pool->dpps[idle_pipe->pipe_idx];
-	idle_pipe->plane_res.mpcc_inst = pool->dpps[idle_pipe->pipe_idx]->inst;
+	sec_dpp_pipe->plane_res.hubp = pool->hubps[sec_dpp_pipe->pipe_idx];
+	sec_dpp_pipe->plane_res.ipp = pool->ipps[sec_dpp_pipe->pipe_idx];
+	sec_dpp_pipe->plane_res.dpp = pool->dpps[sec_dpp_pipe->pipe_idx];
+	sec_dpp_pipe->plane_res.mpcc_inst = pool->dpps[sec_dpp_pipe->pipe_idx]->inst;
 
-	return idle_pipe;
+	return sec_dpp_pipe;
 }
 
 bool dcn20_get_dcc_compression_cap(const struct dc *dc,
@@ -2256,16 +2212,24 @@ enum dc_status dcn20_patch_unknown_plane_state(struct dc_plane_state *plane_stat
 	return DC_OK;
 }
 
+void dcn20_release_pipe(struct dc_state *context,
+			struct pipe_ctx *pipe,
+			const struct resource_pool *pool)
+{
+	if (resource_is_pipe_type(pipe, OPP_HEAD) && pipe->stream_res.dsc)
+		dcn20_release_dsc(&context->res_ctx, pool, &pipe->stream_res.dsc);
+	memset(pipe, 0, sizeof(*pipe));
+}
+
 static const struct resource_funcs dcn20_res_pool_funcs = {
 	.destroy = dcn20_destroy_resource_pool,
 	.link_enc_create = dcn20_link_encoder_create,
 	.panel_cntl_create = dcn20_panel_cntl_create,
 	.validate_bandwidth = dcn20_validate_bandwidth,
-	.acquire_idle_pipe_for_layer = dcn20_acquire_idle_pipe_for_layer,
+	.acquire_free_pipe_as_secondary_dpp_pipe = dcn20_acquire_free_pipe_for_layer,
+	.release_pipe = dcn20_release_pipe,
 	.add_stream_to_ctx = dcn20_add_stream_to_ctx,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	.add_dsc_to_stream_resource = dcn20_add_dsc_to_stream_resource,
-#endif
 	.remove_stream_from_ctx = dcn20_remove_stream_from_ctx,
 	.populate_dml_writeback_from_context = dcn20_populate_dml_writeback_from_context,
 	.patch_unknown_plane_state = dcn20_patch_unknown_plane_state,
@@ -2513,15 +2477,9 @@ static bool dcn20_resource_construct(
 
 	dc->caps.dp_hdmi21_pcon_support = true;
 
-	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV) {
+	if (dc->ctx->dce_environment == DCE_ENV_PRODUCTION_DRV)
 		dc->debug = debug_defaults_drv;
-	} else if (dc->ctx->dce_environment == DCE_ENV_FPGA_MAXIMUS) {
-		pool->base.pipe_count = 4;
-		pool->base.mpcc_count = pool->base.pipe_count;
-		dc->debug = debug_defaults_diags;
-	} else {
-		dc->debug = debug_defaults_diags;
-	}
+
 	//dcn2.0x
 	dc->work_arounds.dedcn20_305_wa = true;
 
@@ -2738,7 +2696,6 @@ static bool dcn20_resource_construct(
 		goto create_fail;
 	}
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	for (i = 0; i < pool->base.res_cap->num_dsc; i++) {
 		pool->base.dscs[i] = dcn20_dsc_create(ctx, i);
 		if (pool->base.dscs[i] == NULL) {
@@ -2747,7 +2704,6 @@ static bool dcn20_resource_construct(
 			goto create_fail;
 		}
 	}
-#endif
 
 	if (!dcn20_dwbc_create(ctx, &pool->base)) {
 		BREAK_TO_DEBUGGER();
@@ -2761,9 +2717,8 @@ static bool dcn20_resource_construct(
 	}
 
 	if (!resource_construct(num_virtual_links, dc, &pool->base,
-			(!IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment) ?
-			&res_create_funcs : &res_create_maximus_funcs)))
-			goto create_fail;
+			&res_create_funcs))
+		goto create_fail;
 
 	dcn20_hw_sequencer_construct(dc);
 
@@ -2793,7 +2748,7 @@ static bool dcn20_resource_construct(
 		ddc_init_data.id.id = dc->ctx->dc_bios->fw_info.oem_i2c_obj_id;
 		ddc_init_data.id.enum_id = 0;
 		ddc_init_data.id.type = OBJECT_TYPE_GENERIC;
-		pool->base.oem_device = link_create_ddc_service(&ddc_init_data);
+		pool->base.oem_device = dc->link_srv->create_ddc_service(&ddc_init_data);
 	} else {
 		pool->base.oem_device = NULL;
 	}

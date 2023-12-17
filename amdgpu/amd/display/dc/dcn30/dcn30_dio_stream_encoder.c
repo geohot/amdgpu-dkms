@@ -28,6 +28,7 @@
 #include "dcn30_dio_stream_encoder.h"
 #include "reg_helper.h"
 #include "hw_shared.h"
+#include "dc.h"
 #include "core_types.h"
 #include <linux/delay.h>
 
@@ -297,7 +298,6 @@ void enc3_stream_encoder_stop_hdmi_info_packets(
 		HDMI_GENERIC14_LINE, 0);
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 /* Set DSC-related configuration.
  *   dsc_mode: 0 disables DSC, other values enable DSC in specified format
  *   sc_bytes_per_pixel: Bytes per pixel in u3.28 format
@@ -404,7 +404,6 @@ static void enc3_read_state(struct stream_encoder *enc, struct enc_state *s)
 		REG_GET(DP_SEC_CNTL, DP_SEC_STREAM_ENABLE, &s->sec_stream_enable);
 	}
 }
-#endif
 
 void enc3_stream_encoder_update_dp_info_packets_sdp_line_num(
 		struct stream_encoder *enc,
@@ -434,6 +433,21 @@ void enc3_stream_encoder_update_dp_info_packets(
 		enc->vpg->funcs->update_generic_info_packet(
 				enc->vpg,
 				0,  /* packetIndex */
+				&info_frame->vsc,
+				true);
+	}
+	/* TODO: VSC SDP at packetIndex 1 should be retricted only if PSR-SU on.
+	 * There should have another Infopacket type (e.g. vsc_psrsu) for PSR_SU.
+	 * In addition, currently the driver check the valid bit then update and
+	 * send the corresponding Infopacket. For PSR-SU, the SDP only be sent
+	 * while entering PSR-SU mode. So we need another parameter(e.g. send)
+	 * in dc_info_packet to indicate which infopacket should be enabled by
+	 * default here.
+	 */
+	if (info_frame->vsc.valid) {
+		enc->vpg->funcs->update_generic_info_packet(
+				enc->vpg,
+				1,  /* packetIndex */
 				&info_frame->vsc,
 				true);
 	}
@@ -854,11 +868,9 @@ static const struct stream_encoder_funcs dcn30_str_enc_funcs = {
 
 	.dp_get_pixel_format  = enc1_stream_encoder_dp_get_pixel_format,
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	.enc_read_state = enc3_read_state,
 	.dp_set_dsc_config = enc3_dp_set_dsc_config,
 	.dp_set_dsc_pps_info_packet = enc3_dp_set_dsc_pps_info_packet,
-#endif
 	.set_dynamic_metadata = enc2_set_dynamic_metadata,
 	.hdmi_reset_stream_attribute = enc1_reset_hdmi_stream_attribute,
 

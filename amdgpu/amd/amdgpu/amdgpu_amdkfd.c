@@ -28,6 +28,7 @@
 #include "amdgpu.h"
 #include "amdgpu_gfx.h"
 #include "amdgpu_dma_buf.h"
+#include <drm/ttm/ttm_tt.h>
 #include <linux/module.h>
 #include <linux/dma-buf.h>
 #include "amdgpu_xgmi.h"
@@ -54,7 +55,6 @@ int amdgpu_amdkfd_init(void)
 	amdgpu_amdkfd_total_mem_size *= si.mem_unit;
 
 	ret = kgd2kfd_init();
-	amdgpu_amdkfd_gpuvm_init_mem_limits();
 	kfd_initialized = !ret;
 
 	return ret;
@@ -97,7 +97,7 @@ static void amdgpu_doorbell_get_kfd_info(struct amdgpu_device *adev,
 					 size_t *start_offset)
 {
 	/*
-	 * The first num_doorbells are used by amdgpu.
+	 * The first num_kernel_doorbells are used by amdgpu.
 	 * amdkfd takes whatever's left in the aperture.
 	 */
 	if (adev->enable_mes) {
@@ -110,11 +110,11 @@ static void amdgpu_doorbell_get_kfd_info(struct amdgpu_device *adev,
 		*aperture_base = adev->doorbell.base;
 		*aperture_size = 0;
 		*start_offset = 0;
-	} else if (adev->doorbell.size > adev->doorbell.num_doorbells *
+	} else if (adev->doorbell.size > adev->doorbell.num_kernel_doorbells *
 						sizeof(u32)) {
 		*aperture_base = adev->doorbell.base;
 		*aperture_size = adev->doorbell.size;
-		*start_offset = adev->doorbell.num_doorbells * sizeof(u32);
+		*start_offset = adev->doorbell.num_kernel_doorbells * sizeof(u32);
 	} else {
 		*aperture_base = 0;
 		*aperture_size = 0;
@@ -144,6 +144,8 @@ void amdgpu_amdkfd_device_init(struct amdgpu_device *adev)
 	int i;
 	int last_valid_bit;
 
+	amdgpu_amdkfd_gpuvm_init_mem_limits();
+
 	if (adev->kfd.dev) {
 		struct kgd2kfd_shared_resources gpu_resources = {
 			.compute_vmid_bitmap =
@@ -163,8 +165,8 @@ void amdgpu_amdkfd_device_init(struct amdgpu_device *adev)
 		 * clear
 		 */
 		bitmap_complement(gpu_resources.cp_queue_bitmap,
-				  adev->gfx.mec.queue_bitmap,
-				  KGD_MAX_QUEUES);
+				  adev->gfx.mec_bitmap[0].queue_bitmap,
+				  AMDGPU_MAX_QUEUES);
 
 		/* According to linux/bitmap.h we shouldn't use bitmap_clear if
 		 * nbits is not compile time constant
@@ -172,7 +174,7 @@ void amdgpu_amdkfd_device_init(struct amdgpu_device *adev)
 		last_valid_bit = 1 /* only first MEC can have compute queues */
 				* adev->gfx.mec.num_pipe_per_mec
 				* adev->gfx.mec.num_queue_per_pipe;
-		for (i = last_valid_bit; i < KGD_MAX_QUEUES; ++i)
+		for (i = last_valid_bit; i < AMDGPU_MAX_QUEUES; ++i)
 			clear_bit(i, gpu_resources.cp_queue_bitmap);
 
 		amdgpu_doorbell_get_kfd_info(adev,
@@ -226,22 +228,12 @@ void amdgpu_amdkfd_suspend(struct amdgpu_device *adev, bool run_pm)
 		kgd2kfd_suspend(adev->kfd.dev, run_pm, true);
 }
 
-int amdgpu_amdkfd_resume_iommu(struct amdgpu_device *adev)
+int amdgpu_amdkfd_resume(struct amdgpu_device *adev, bool run_pm)
 {
 	int r = 0;
 
 	if (adev->kfd.dev)
-		r = kgd2kfd_resume_iommu(adev->kfd.dev);
-
-	return r;
-}
-
-int amdgpu_amdkfd_resume(struct amdgpu_device *adev, bool run_pm, bool sync)
-{
-	int r = 0;
-
-	if (adev->kfd.dev)
-		r = kgd2kfd_resume(adev->kfd.dev, run_pm, sync);
+		r = kgd2kfd_resume(adev->kfd.dev, run_pm);
 
 	return r;
 }
@@ -431,14 +423,23 @@ uint32_t amdgpu_amdkfd_get_fw_version(struct amdgpu_device *adev,
 }
 
 void amdgpu_amdkfd_get_local_mem_info(struct amdgpu_device *adev,
-				      struct kfd_local_mem_info *mem_info)
+				      struct kfd_local_mem_info *mem_info,
+				      struct amdgpu_xcp *xcp)
 {
 	memset(mem_info, 0, sizeof(*mem_info));
 
-	mem_info->local_mem_size_public = adev->gmc.visible_vram_size;
-	mem_info->local_mem_size_private = adev->gmc.real_vram_size -
+	if (xcp) {
+		if (adev->gmc.real_vram_size == adev->gmc.visible_vram_size)
+			mem_info->local_mem_size_public =
+					KFD_XCP_MEMORY_SIZE(adev, xcp->id);
+		else
+			mem_info->local_mem_size_private =
+					KFD_XCP_MEMORY_SIZE(adev, xcp->id);
+	} else {
+		mem_info->local_mem_size_public = adev->gmc.visible_vram_size;
+		mem_info->local_mem_size_private = adev->gmc.real_vram_size -
 						adev->gmc.visible_vram_size;
-
+	}
 	mem_info->vram_width = adev->gmc.vram_width;
 
 	pr_debug("Address base: %pap public 0x%llx private 0x%llx\n",
@@ -446,9 +447,7 @@ void amdgpu_amdkfd_get_local_mem_info(struct amdgpu_device *adev,
 			mem_info->local_mem_size_public,
 			mem_info->local_mem_size_private);
 
-	if (amdgpu_sriov_vf(adev))
-		mem_info->mem_clk_max = adev->clock.default_mclk / 100;
-	else if (adev->pm.dpm_enabled) {
+	if (adev->pm.dpm_enabled) {
 		if (amdgpu_emu_mode == 1)
 			mem_info->mem_clk_max = 0;
 		else
@@ -467,41 +466,17 @@ uint64_t amdgpu_amdkfd_get_gpu_clock_counter(struct amdgpu_device *adev)
 uint32_t amdgpu_amdkfd_get_max_engine_clock_in_mhz(struct amdgpu_device *adev)
 {
 	/* the sclk is in quantas of 10kHz */
-	if (amdgpu_sriov_vf(adev))
-		return adev->clock.default_sclk / 100;
-	else if (adev->pm.dpm_enabled)
+	if (adev->pm.dpm_enabled)
 		return amdgpu_dpm_get_sclk(adev, false) / 100;
 	else
 		return 100;
-}
-
-void amdgpu_amdkfd_get_cu_info(struct amdgpu_device *adev, struct kfd_cu_info *cu_info)
-{
-	struct amdgpu_cu_info acu_info = adev->gfx.cu_info;
-
-	memset(cu_info, 0, sizeof(*cu_info));
-	if (sizeof(cu_info->cu_bitmap) != sizeof(acu_info.bitmap))
-		return;
-
-	cu_info->cu_active_number = acu_info.number;
-	cu_info->cu_ao_mask = acu_info.ao_cu_mask;
-	memcpy(&cu_info->cu_bitmap[0], &acu_info.bitmap[0],
-	       sizeof(acu_info.bitmap));
-	cu_info->num_shader_engines = adev->gfx.config.max_shader_engines;
-	cu_info->num_shader_arrays_per_engine = adev->gfx.config.max_sh_per_se;
-	cu_info->num_cu_per_sh = adev->gfx.config.max_cu_per_sh;
-	cu_info->simd_per_cu = acu_info.simd_per_cu;
-	cu_info->max_waves_per_simd = acu_info.max_waves_per_simd;
-	cu_info->wave_front_size = acu_info.wave_front_size;
-	cu_info->max_scratch_slots_per_cu = acu_info.max_scratch_slots_per_cu;
-	cu_info->lds_size = acu_info.lds_size;
 }
 
 int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 				  struct amdgpu_device **dmabuf_adev,
 				  uint64_t *bo_size, void *metadata_buffer,
 				  size_t buffer_size, uint32_t *metadata_size,
-				  uint32_t *flags)
+				  uint32_t *flags, int8_t *xcp_id)
 {
 	struct dma_buf *dma_buf;
 	struct drm_gem_object *obj;
@@ -547,6 +522,8 @@ int amdgpu_amdkfd_get_dmabuf_info(struct amdgpu_device *adev, int dma_buf_fd,
 		if (bo->flags & AMDGPU_GEM_CREATE_CPU_ACCESS_REQUIRED)
 			*flags |= KFD_IOC_ALLOC_MEM_FLAGS_PUBLIC;
 	}
+	if (xcp_id)
+		*xcp_id = bo->xcp_id;
 
 out_put:
 	dma_buf_put(dma_buf);
@@ -582,7 +559,7 @@ int amdgpu_amdkfd_get_xgmi_bandwidth_mbytes(struct amdgpu_device *dst,
 	struct amdgpu_device *adev = dst, *peer_adev;
 	int num_links;
 
-	if (adev->asic_type != CHIP_ALDEBARAN)
+	if (amdgpu_ip_version(adev, GC_HWIP, 0) < IP_VERSION(9, 4, 2))
 		return 0;
 
 	if (src)
@@ -685,7 +662,7 @@ int amdgpu_amdkfd_submit_ib(struct amdgpu_device *adev,
 		goto err;
 	}
 
-	ret = amdgpu_job_alloc(adev, 1, &job, NULL);
+	ret = amdgpu_job_alloc(adev, NULL, NULL, NULL, 1, &job);
 	if (ret)
 		goto err;
 
@@ -721,7 +698,7 @@ void amdgpu_amdkfd_set_compute_idle(struct amdgpu_device *adev, bool idle)
 	/* Temporary workaround to fix issues observed in some
 	 * compute applications when GFXOFF is enabled on GFX11.
 	 */
-	if (IP_VERSION_MAJ(adev->ip_versions[GC_HWIP][0]) == 11) {
+	if (IP_VERSION_MAJ(amdgpu_ip_version(adev, GC_HWIP, 0)) == 11) {
 		pr_debug("GFXOFF is %s\n", idle ? "enabled" : "disabled");
 		amdgpu_gfx_off_ctrl(adev, idle);
 	}
@@ -744,17 +721,19 @@ int amdgpu_amdkfd_flush_gpu_tlb_vmid(struct amdgpu_device *adev,
 	if (adev->family == AMDGPU_FAMILY_AI) {
 		int i;
 
-		for (i = 0; i < adev->num_vmhubs; i++)
+		for_each_set_bit(i, adev->vmhubs_mask, AMDGPU_MAX_VMHUBS)
 			amdgpu_gmc_flush_gpu_tlb(adev, vmid, i, 0);
 	} else {
-		amdgpu_gmc_flush_gpu_tlb(adev, vmid, AMDGPU_GFXHUB_0, 0);
+		amdgpu_gmc_flush_gpu_tlb(adev, vmid, AMDGPU_GFXHUB(0), 0);
 	}
 
 	return 0;
 }
 
 int amdgpu_amdkfd_flush_gpu_tlb_pasid(struct amdgpu_device *adev,
-				      uint16_t pasid, enum TLB_FLUSH_TYPE flush_type)
+				      uint16_t pasid,
+				      enum TLB_FLUSH_TYPE flush_type,
+				      uint32_t inst)
 {
 	bool all_hub = false;
 
@@ -762,7 +741,7 @@ int amdgpu_amdkfd_flush_gpu_tlb_pasid(struct amdgpu_device *adev,
 	    adev->family == AMDGPU_FAMILY_RV)
 		all_hub = true;
 
-	return amdgpu_gmc_flush_gpu_tlb_pasid(adev, pasid, flush_type, all_hub);
+	return amdgpu_gmc_flush_gpu_tlb_pasid(adev, pasid, flush_type, all_hub, inst);
 }
 
 bool amdgpu_amdkfd_have_atomics_support(struct amdgpu_device *adev)
@@ -802,4 +781,91 @@ bool amdgpu_amdkfd_ras_query_utcl2_poison_status(struct amdgpu_device *adev)
 		return adev->gfx.ras->query_utcl2_poison_status(adev);
 	else
 		return false;
+}
+
+int amdgpu_amdkfd_check_and_lock_kfd(struct amdgpu_device *adev)
+{
+	return kgd2kfd_check_and_lock_kfd();
+}
+
+void amdgpu_amdkfd_unlock_kfd(struct amdgpu_device *adev)
+{
+	kgd2kfd_unlock_kfd();
+}
+
+
+u64 amdgpu_amdkfd_xcp_memory_size(struct amdgpu_device *adev, int xcp_id)
+{
+	s8 mem_id = KFD_XCP_MEM_ID(adev, xcp_id);
+	u64 tmp;
+
+	if (adev->gmc.num_mem_partitions && xcp_id >= 0 && mem_id >= 0) {
+		if (adev->gmc.is_app_apu && adev->gmc.num_mem_partitions == 1) {
+			/* In NPS1 mode, we should restrict the vram reporting
+			 * tied to the ttm_pages_limit which is 1/2 of the system
+			 * memory. For other partition modes, the HBM is uniformly
+			 * divided already per numa node reported. If user wants to
+			 * go beyond the default ttm limit and maximize the ROCm
+			 * allocations, they can go up to max ttm and sysmem limits.
+			 */
+
+			tmp = (ttm_tt_pages_limit() << PAGE_SHIFT) / num_online_nodes();
+		} else {
+			tmp = adev->gmc.mem_partitions[mem_id].size;
+		}
+		do_div(tmp, adev->xcp_mgr->num_xcp_per_mem_partition);
+		return ALIGN_DOWN(tmp, PAGE_SIZE);
+	} else {
+		return adev->gmc.real_vram_size;
+	}
+}
+
+int amdgpu_amdkfd_unmap_hiq(struct amdgpu_device *adev, u32 doorbell_off,
+			    u32 inst)
+{
+	struct amdgpu_kiq *kiq = &adev->gfx.kiq[inst];
+	struct amdgpu_ring *kiq_ring = &kiq->ring;
+	struct amdgpu_ring_funcs *ring_funcs;
+	struct amdgpu_ring *ring;
+	int r = 0;
+
+	if (!kiq->pmf || !kiq->pmf->kiq_unmap_queues)
+		return -EINVAL;
+
+	ring_funcs = kzalloc(sizeof(*ring_funcs), GFP_KERNEL);
+	if (!ring_funcs)
+		return -ENOMEM;
+
+	ring = kzalloc(sizeof(*ring), GFP_KERNEL);
+	if (!ring) {
+		r = -ENOMEM;
+		goto free_ring_funcs;
+	}
+
+	ring_funcs->type = AMDGPU_RING_TYPE_COMPUTE;
+	ring->doorbell_index = doorbell_off;
+	ring->funcs = ring_funcs;
+
+	spin_lock(&kiq->ring_lock);
+
+	if (amdgpu_ring_alloc(kiq_ring, kiq->pmf->unmap_queues_size)) {
+		spin_unlock(&kiq->ring_lock);
+		r = -ENOMEM;
+		goto free_ring;
+	}
+
+	kiq->pmf->kiq_unmap_queues(kiq_ring, ring, RESET_QUEUES, 0, 0);
+
+	if (kiq_ring->sched.ready && !adev->job_hang)
+		r = amdgpu_ring_test_helper(kiq_ring);
+
+	spin_unlock(&kiq->ring_lock);
+
+free_ring:
+	kfree(ring);
+
+free_ring_funcs:
+	kfree(ring_funcs);
+
+	return r;
 }

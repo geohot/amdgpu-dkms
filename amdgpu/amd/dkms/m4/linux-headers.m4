@@ -1,24 +1,6 @@
 AC_DEFUN([AC_AMDGPU_LINUX_HEADERS], [
 
 	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/overflow.h])
-
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/sched/mm.h])
-
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/sched/task.h])
-
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/sched/signal.h])
-
-	dnl #
-	dnl #  commit v4.15-28-gf3804203306e
-	dnl #  array_index_nospec: Sanitize speculative array de-references
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/nospec.h])
-
-	dnl #
 	dnl # commit 8bd9cb51daac89337295b6f037b0486911e1b408
 	dnl # locking/atomics, asm-generic: Move some macros from <linux/bitops.h>
 	dnl # to a new <linux/bits.h> file
@@ -44,22 +26,16 @@ AC_DEFUN([AC_AMDGPU_LINUX_HEADERS], [
 	AC_KERNEL_CHECK_HEADERS([asm/fpu/api.h])
 
 	dnl #
-	dnl # commit 607ca46e97a1b6594b29647d98a32d545c24bdff
-	dnl # UAPI: (Scripted) Disintegrate include/linux
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([uapi/linux/sched/types.h])
-
-	dnl #
 	dnl # v4.19-rc6-7-ga3f8a30f3f00
 	dnl # Compiler Attributes: use feature checks instead of version checks
 	dnl #
 	AC_KERNEL_CHECK_HEADERS([linux/compiler_attributes.h])
 
 	dnl #
-	dnl # v4.9-rc2-299-gf54d1867005c
-	dnl # dma-buf: Rename struct fence to dma_fence
+	dnl # commit b3dfbdf261e076a997f812323edfdba84ba80256
+	dnl # dma-buf/fence: add fence_array fences v6
 	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/dma-fence.h])
+	AC_KERNEL_CHECK_HEADERS([linux/fence-array.h])
 
 	dnl #
 	dnl # v5.3-rc1-449-g52791eeec1d9
@@ -84,12 +60,6 @@ AC_DEFUN([AC_AMDGPU_LINUX_HEADERS], [
 	dnl # dma-mapping: use unsigned long for dma_attrs
 	dnl #
 	AC_KERNEL_CHECK_HEADERS([linux/dma-attrs.h])
-
-	dnl #
-	dnl # v4.13-rc1-41-g7744ccdbc16f
-	dnl # x86/mm: Add Secure Memory Encryption (SME) support
-	dnl #
-	AC_KERNEL_CHECK_HEADERS([linux/mem_encrypt.h])
 
 	dnl #
 	dnl # 01fd30da0474
@@ -144,4 +114,19 @@ AC_DEFUN([AC_AMDGPU_LINUX_HEADERS], [
 	dnl # dma-mapping: split <linux/dma-mapping.h>
 	dnl #
 	AC_KERNEL_CHECK_HEADERS([linux/dma-map-ops.h])
+
+	dnl #v4.5-rc3-203-g2413306c2566
+	dnl #apple-gmux: Add helper for presence detect
+	dnl
+	AC_KERNEL_CHECK_HEADERS([linux/apple-gmux.h])
+
+	dnl #v4.12-10499-gbc6245e5efd7
+	dnl #bug: split BUILD_BUG stuff out into <linux/build_bug.h>
+	dnl
+	AC_KERNEL_CHECK_HEADERS([linux/build_bug.h])
+
+	dnl #v5.5-rc2-6-ga8ae608529ab
+	dnl #device.h: move 'struct class' stuff out to device/class.h
+	dnl
+	AC_KERNEL_CHECK_HEADERS([linux/device/class.h])
 ])

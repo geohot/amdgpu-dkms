@@ -15,38 +15,6 @@
 #include <linux/version.h>
 #include <kcl/kcl_rcupdate.h>
 #include <linux/dma-fence.h>
-#include <kcl/kcl_fence_array.h>
-
-#if !defined(HAVE_LINUX_DMA_FENCE_H)
-#define dma_fence_cb fence_cb
-#define dma_fence_ops fence_ops
-#define dma_fence_array fence_array
-#define dma_fence fence
-#define dma_fence_init fence_init
-#define dma_fence_context_alloc fence_context_alloc
-#define DMA_FENCE_TRACE FENCE_TRACE
-#define DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT FENCE_FLAG_ENABLE_SIGNAL_BIT
-#define DMA_FENCE_FLAG_SIGNALED_BIT FENCE_FLAG_SIGNALED_BIT
-#define DMA_FENCE_FLAG_USER_BITS FENCE_FLAG_USER_BITS
-#define dma_fence_wait fence_wait
-#define dma_fence_get fence_get
-#define dma_fence_put fence_put
-#define dma_fence_is_signaled fence_is_signaled
-#define dma_fence_signal fence_signal
-#define dma_fence_signal_locked fence_signal_locked
-#define dma_fence_get_rcu fence_get_rcu
-#define dma_fence_array_create fence_array_create
-#define dma_fence_add_callback fence_add_callback
-#define dma_fence_remove_callback fence_remove_callback
-#define dma_fence_enable_sw_signaling fence_enable_sw_signaling
-#define dma_fence_default_wait fence_default_wait
-#define dma_fence_free fence_free
-#define dma_fence_get_rcu_safe fence_get_rcu
-
-#if defined(HAVE_DMA_FENCE_SET_ERROR)
-#define dma_fence_set_error fence_set_error
-#endif
-#endif
 
 #if !defined(HAVE__DMA_FENCE_IS_LATER_2ARGS)
 
@@ -82,20 +50,6 @@ static inline bool __dma_fence_is_later(u64 f1, u64 f2,
 
 #endif
 #endif /* HAVE__DMA_FENCE_IS_LATER_2ARGS */
-
-/* commit v4.5-rc3-715-gb47bcb93bbf2
- * fall back to HAVE_LINUX_DMA_FENCE_H check directly
- * as it's hard to detect the implementation in kernel
- */
-#if !defined(HAVE_LINUX_DMA_FENCE_H)
-static inline bool dma_fence_is_later(struct dma_fence *f1, struct dma_fence *f2)
-{
-	if (WARN_ON(f1->context != f2->context))
-		return false;
-
-	return (int)(f1->seqno - f2->seqno) > 0;
-}
-#endif
 
 /*
  * commit v4.18-rc2-533-g418cc6ca0607
@@ -177,18 +131,6 @@ bool _kcl_fence_enable_signaling(struct dma_fence *f);
 #define AMDKCL_DMA_FENCE_OPS_ENABLE_SIGNALING_OPTIONAL
 #endif
 
-#if !defined(HAVE_DMA_FENCE_SET_ERROR)
-/* Copied from include/linux/dma-fence.h and modified for KCL */
-static inline void dma_fence_set_error(struct dma_fence *fence,
-				       int error)
-{
-	BUG_ON(test_bit(DMA_FENCE_FLAG_SIGNALED_BIT, &fence->flags));
-	BUG_ON(error >= 0 || error < -MAX_ERRNO);
-
-	fence->status = error;
-}
-#endif
-
 /*
  * commit v4.18-rc2-533-g418cc6ca0607
  * dma-fence: Make ->wait callback optional
@@ -198,14 +140,6 @@ static inline void dma_fence_set_error(struct dma_fence *fence,
 	.wait = dma_fence_default_wait,
 #else
 #define AMDKCL_DMA_FENCE_OPS_WAIT_OPTIONAL
-#endif
-
-#if !defined(HAVE_DMA_FENCE_GET_STUB)
-struct dma_fence *_kcl_dma_fence_get_stub(void);
-static inline struct dma_fence *dma_fence_get_stub(void)
-{
-	return _kcl_dma_fence_get_stub();
-}
 #endif
 
 #if !defined(HAVE_DMA_FENCE_DESCRIBE)

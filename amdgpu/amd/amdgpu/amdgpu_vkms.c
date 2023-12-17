@@ -55,8 +55,9 @@ static enum hrtimer_restart amdgpu_vkms_vblank_simulate(struct hrtimer *timer)
 		DRM_WARN("%s: vblank timer overrun\n", __func__);
 
 	ret = drm_crtc_handle_vblank(crtc);
+	/* Don't queue timer again when vblank is disabled. */
 	if (!ret)
-		DRM_ERROR("amdgpu_vkms failure on handling vblank");
+		return HRTIMER_NORESTART;
 
 	return HRTIMER_RESTART;
 }
@@ -81,7 +82,7 @@ static void amdgpu_vkms_disable_vblank(struct drm_crtc *crtc)
 {
 	struct amdgpu_crtc *amdgpu_crtc = to_amdgpu_crtc(crtc);
 
-	hrtimer_cancel(&amdgpu_crtc->vblank_timer);
+	hrtimer_try_to_cancel(&amdgpu_crtc->vblank_timer);
 }
 
 static bool amdgpu_vkms_get_vblank_timestamp(struct drm_crtc *crtc,
@@ -101,11 +102,7 @@ static bool amdgpu_vkms_get_vblank_timestamp(struct drm_crtc *crtc,
 	}
 
 	*vblank_time = READ_ONCE(amdgpu_crtc->vblank_timer.node.expires);
-#if defined (HAVE_DRM_VBLANK_USE_KTIME_T)
 	if (WARN_ON(ktime_to_us(*vblank_time) == ktime_to_us(vblank->time)))
-#else
-	if (WARN_ON(ktime_to_us(*vblank_time) == vblank->time.tv_usec))
-#endif
 		return true;
 	/*
 	 * To prevent races we roll the hrtimer forward before we do any
@@ -133,13 +130,11 @@ static const struct drm_crtc_funcs amdgpu_vkms_crtc_funcs = {
 #endif
 };
 
-static void amdgpu_vkms_crtc_atomic_enable(struct drm_crtc *crtc
+static void amdgpu_vkms_crtc_atomic_enable(struct drm_crtc *crtc,
 #if defined(HAVE_DRM_CRTC_HELPER_FUNCS_ATOMIC_ENABLE_ARG_DRM_ATOMIC_STATE)
-					  , struct drm_atomic_state *state)
-#elif defined(HAVE_DRM_CRTC_HELPER_FUNCS_HAVE_ATOMIC_ENABLE)
-					  , struct drm_crtc_state *state)
+					   struct drm_atomic_state *state)
 #else
-					  )
+					   struct drm_crtc_state *state)
 #endif
 {
 	drm_crtc_vblank_on(crtc);
@@ -180,11 +175,7 @@ static void amdgpu_vkms_crtc_atomic_flush(struct drm_crtc *crtc,
 
 static const struct drm_crtc_helper_funcs amdgpu_vkms_crtc_helper_funcs = {
 	.atomic_flush	= amdgpu_vkms_crtc_atomic_flush,
-#if defined(HAVE_DRM_CRTC_HELPER_FUNCS_HAVE_ATOMIC_ENABLE)
 	.atomic_enable	= amdgpu_vkms_crtc_atomic_enable,
-#else
-	.enable = amdgpu_vkms_crtc_atomic_enable,
-#endif
 	.atomic_disable	= amdgpu_vkms_crtc_atomic_disable,
 };
 
@@ -317,7 +308,7 @@ static int amdgpu_vkms_plane_atomic_check(struct drm_plane *plane,
 #if defined(HAVE_STRUCT_DRM_PLANE_HELPER_FUNCS_ATOMIC_CHECK_DRM_ATOMIC_STATE_PARAMS)
 					  struct drm_atomic_state *state)
 {
-	struct drm_plane_state *new_plane_state = kcl_drm_atomic_get_new_plane_state_before_commit(state,
+	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
 #else
 					  struct drm_plane_state *new_plane_state)
@@ -654,12 +645,9 @@ static int amdgpu_vkms_sw_init(void *handle)
 	adev_to_drm(adev)->mode_config.preferred_depth = 24;
 	adev_to_drm(adev)->mode_config.prefer_shadow = 1;
 
-	adev_to_drm(adev)->mode_config.fb_base = adev->gmc.aper_base;
-
 #ifdef HAVE_DRM_MODE_CONFIG_FB_MODIFIERS_NOT_SUPPORTED
 	adev_to_drm(adev)->mode_config.fb_modifiers_not_supported = true;
 #endif
-
 	r = amdgpu_display_modeset_create_props(adev);
 	if (r)
 		return r;

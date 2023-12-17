@@ -1,3 +1,39 @@
+ifeq ($(CC), gcc)
+GCCMAJ=$(shell echo __GNUC__ | $(CC) -E -x c - | tail -n 1)
+GCCMIN=$(shell echo __GNUC_MINOR__ | $(CC) -E -x c - | tail -n 1)
+GCCPAT=$(shell echo __GNUC_PATCHLEVEL__ | $(CC) -E -x c - | tail -n 1)
+# CONFIG_GCC_VERSION returns x.xx.xx as the version format
+GCCSTR=$(shell printf "%d%02d%02d" $(GCCMAJ) $(GCCMIN) $(GCCPAT))
+
+KERNEL_MAJ=$(VERSION)
+KERNEL_PATCHLEVEL=$(PATCHLEVEL)
+KERNEL_SUBLEVEL=$(SUBLEVEL)
+KERNEL_VER=$(shell printf "%d%02d%02d" $(KERNEL_MAJ) $(KERNEL_PATCHLEVEL) $(KERNEL_SUBLEVEL))
+
+kernel-version = $(shell [ $(KERNEL_VER)0 $(1) $(2)000 ] && echo $(3) || echo $(4))
+
+ifdef CONFIG_CC_IS_GCC
+ifeq ($(shell [ $(CONFIG_GCC_VERSION) -ne $(GCCSTR) ] && echo y), y)
+$(warning "Local GCC version $(GCCSTR) does not match kernel compiler GCC version $(CONFIG_GCC_VERSION)")
+$(warning "This may cause unexpected and hard-to-isolate compiler-related issues")
+endif
+else
+export CONFIG_CC_IS_GCC=y
+export CONFIG_GCC_VERSION=$(GCCSTR)
+$(warning "CONFIG_CC_IS_GCC is not defined. Let's export it with version $(CONFIG_GCC_VERSION)")
+endif
+
+endif
+
+include  $(src)/amd/dkms/Makefile.compiler
+
+# gcc 4.8.5 is too old for kernel >= 5.4, which will cause the compile failure.
+ifneq ($(call gcc-min-version, 40805), y)
+ifeq ($(call kernel-version, -ge, 0504, y), y)
+$(error "The GCC is too old for this kernel, please update the GCC to higher than 9.3")
+endif
+endif
+
 ifndef CONFIG_DRM
 $(error CONFIG_DRM disabled, exit...)
 endif
@@ -14,24 +50,6 @@ _is_kcl_macro_defined=$(shell grep $1 $(src)/amd/dkms/config/config.h | grep -q 
 
 ifeq ($(call _is_kcl_macro_defined,HAVE_DMA_RESV_SEQ_BUG),y)
 $(error dma_resv->seq is missing. exit...)
-endif
-
-ifeq ($(CC), gcc)
-GCCMAJ=$(shell echo __GNUC__ | $(CC) -E -x c - | tail -n 1)
-GCCMIN=$(shell echo __GNUC_MINOR__ | $(CC) -E -x c - | tail -n 1)
-GCCPAT=$(shell echo __GNUC_PATCHLEVEL__ | $(CC) -E -x c - | tail -n 1)
-# CONFIG_GCC_VERSION returns x.xx.xx as the version format
-GCCSTR=$(shell printf "%d%02d%02d" $(GCCMAJ) $(GCCMIN) $(GCCPAT))
-ifdef CONFIG_CC_IS_GCC
-ifeq ($(shell [ $(CONFIG_GCC_VERSION) -ne $(GCCSTR) ] && echo y), y)
-$(warning "Local GCC version $(GCCSTR) does not match kernel compiler GCC version $(CONFIG_GCC_VERSION)")
-$(warning "This may cause unexpected and hard-to-isolate compiler-related issues")
-endif
-else
-export CONFIG_CC_IS_GCC=y
-export CONFIG_GCC_VERSION=$(GCCSTR)
-$(warning "CONFIG_CC_IS_GCC is not defined. Let's export it with version $(CONFIG_GCC_VERSION)")
-endif
 endif
 
 DRM_VER=$(shell sed -n 's/^RHEL_DRM_VERSION = \(.*\)/\1/p' $(srctree)/Makefile)
@@ -143,7 +161,6 @@ LINUXINCLUDE := \
 	-include $(src)/amd/dkms/config/config.h \
 	$(LINUX_SRCTREE_INCLUDE) \
 	-I$(src)/include/uapi \
-	-I$(src)/include/kcl/header/uapi \
 	$(USER_INCLUDE)
 
 export CONFIG_HSA_AMD=y
@@ -186,29 +203,23 @@ endif
 # if core2 isn't in the compiler flags
 ifndef CONFIG_ARM64
 ifeq ($(filter %core2, $(KBUILD_CFLAGS)),)
-export CONFIG_DRM_AMD_DC_DCN=y
-subdir-ccflags-y += -DCONFIG_DRM_AMD_DC_DCN
-
-ifeq ($(filter y,$(call _is_kcl_macro_defined,HAVE_DRM_DISPLAY_DRM_DSC_H) \
-	$(call _is_kcl_macro_defined,HAVE_DRM_DRM_DSC_H)), y)
-export CONFIG_DRM_AMD_DC_DSC_SUPPORT=y
-subdir-ccflags-y += -DCONFIG_DRM_AMD_DC_DSC_SUPPORT
-endif
+export CONFIG_DRM_AMD_DC_FP=y
+subdir-ccflags-y += -DCONFIG_DRM_AMD_DC_FP
 endif
 endif
 
-export CONFIG_DRM_TTM_HELPER=m
-subdir-ccflags-y += -DCONFIG_DRM_TTM_HELPER
-CFLAGS_drm_gem_ttm_helper.o += -include $(src)/ttm/backport/backport.h \
-								-include $(src)/include/kcl/backport/kcl_drm_gem.h \
-								-DHAVE_CONFIG_H
-amddrm_ttm_helper-y := drm_gem_ttm_helper.o
-obj-$(CONFIG_DRM_TTM_HELPER) += amddrm_ttm_helper.o
+# v5.17-rc4-3-ge8c07082a810 (Kbuild: move to -std=gnu11)
+# Upstream patches now uses gnu11/gnu99 as the default C standard version.
+# However, gcc in legacy OS still uses gnu89, which will introduce a standard
+# build gap leading to a DKMS build failure possibly. So add below check to
+# move gnu89 to gnu99 if KBUILD_CFLAGS still uses gnu89.
+ifeq ($(findstring gnu89,$(KBUILD_CFLAGS)),gnu89)
+KBUILD_CFLAGS := $(subst gnu89,gnu99,$(KBUILD_CFLAGS))
+$(warning "The local C standard(gnu89) doesn't match kernel default C standard(gnu11/gnu99)")
+endif
 
-export CONFIG_DRM_BUDDY=m
-subdir-ccflags-y += -DCONFIG_DRM_BUDDY
-CFLAGS_drm_buddy.o += -DHAVE_CONFIG_H
-amddrm_buddy-y := drm_buddy.o
-obj-$(CONFIG_DRM_BUDDY) += amddrm_buddy.o
+include  $(src)/amd/dkms/Makefile.drm_ttm_helper
 
-obj-m += scheduler/ amd/amdgpu/ ttm/ amd/amdkcl/
+include  $(src)/amd/dkms/Makefile.drm_buddy
+
+obj-m += scheduler/ amd/amdgpu/ amd/amdxcp/ ttm/ amd/amdkcl/

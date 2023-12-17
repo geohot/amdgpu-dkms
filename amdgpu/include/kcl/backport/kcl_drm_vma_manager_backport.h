@@ -42,26 +42,27 @@
 #define DRM_FILE_PAGE_OFFSET_SIZE ((0xFFFFFFFFULL >> PAGE_SHIFT) * 4096)
 
 static inline void
-kcl_drm_vma_offset_manager_init(struct drm_vma_offset_manager *mgr)
+kcl_drm_vma_offset_manager_adjust(struct drm_vma_offset_manager *mgr)
 {
-	drm_vma_offset_manager_destroy(mgr);
+	u64 size;
+
+	BUG_ON(!mgr);
+
+	size = mgr->vm_addr_space_mm.head_node.hole_size;
+	if (size < DRM_FILE_PAGE_OFFSET_SIZE)
+		drm_vma_offset_manager_destroy(mgr);
+	else
+		return;
+
 	drm_vma_offset_manager_init(mgr,
 		DRM_FILE_PAGE_OFFSET_START,
 		DRM_FILE_PAGE_OFFSET_SIZE);
 }
 #else
 static inline void
-kcl_drm_vma_offset_manager_init(struct drm_vma_offset_manager *mgr)
+kcl_drm_vma_offset_manager_adjust(struct drm_vma_offset_manager *mgr)
 {
 }
 #endif
 
-#ifndef HAVE_DRM_VMA_NODE_VERIFY_ACCESS_HAS_DRM_FILE
-static inline int _kcl_drm_vma_node_verify_access(struct drm_vma_offset_node *node,
-					     struct drm_file *tag)
-{
-	return drm_vma_node_verify_access(node, tag->filp);
-}
-#define drm_vma_node_verify_access _kcl_drm_vma_node_verify_access
-#endif
 #endif

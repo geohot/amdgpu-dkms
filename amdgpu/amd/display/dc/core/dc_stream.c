@@ -71,8 +71,7 @@ static bool dc_stream_construct(struct dc_stream_state *stream,
 
 	/* Copy audio modes */
 	/* TODO - Remove this translation */
-	for (i = 0; i < (dc_sink_data->edid_caps.audio_mode_count); i++)
-	{
+	for (i = 0; i < (dc_sink_data->edid_caps.audio_mode_count); i++) {
 		stream->audio_info.modes[i].channel_count = dc_sink_data->edid_caps.audio_modes[i].channel_count;
 		stream->audio_info.modes[i].format_code = dc_sink_data->edid_caps.audio_modes[i].format_code;
 		stream->audio_info.modes[i].sample_rates.all = dc_sink_data->edid_caps.audio_modes[i].sample_rate;
@@ -104,7 +103,6 @@ static bool dc_stream_construct(struct dc_stream_state *stream,
 	/* EDID CAP translation for HDMI 2.0 */
 	stream->timing.flags.LTE_340MCSC_SCRAMBLE = dc_sink_data->edid_caps.lte_340mcsc_scramble;
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	memset(&stream->timing.dsc_cfg, 0, sizeof(stream->timing.dsc_cfg));
 	stream->timing.dsc_cfg.num_slices_h = 0;
 	stream->timing.dsc_cfg.num_slices_v = 0;
@@ -113,7 +111,6 @@ static bool dc_stream_construct(struct dc_stream_state *stream,
 	stream->timing.dsc_cfg.linebuf_depth = 9;
 	stream->timing.dsc_cfg.version_minor = 2;
 	stream->timing.dsc_cfg.ycbcr422_simple = 0;
-#endif
 
 	update_stream_signal(stream, dc_sink_data);
 
@@ -278,8 +275,8 @@ static void program_cursor_attributes(
 		}
 
 		dc->hwss.set_cursor_attribute(pipe_ctx);
-
-		dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
+		if (dc->ctx->dmub_srv)
+			dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
 		if (dc->hwss.set_cursor_sdr_white_level)
 			dc->hwss.set_cursor_sdr_white_level(pipe_ctx);
 	}
@@ -290,23 +287,6 @@ static void program_cursor_attributes(
 			dc->hwss.cursor_lock(dc, pipe_to_program->next_odm_pipe, false);
 	}
 }
-
-#ifndef TRIM_FSFT
-/*
- * dc_optimize_timing_for_fsft() - dc to optimize timing
- */
-bool dc_optimize_timing_for_fsft(
-	struct dc_stream_state *pStream,
-	unsigned int max_input_rate_in_khz)
-{
-	struct dc  *dc;
-
-	dc = pStream->ctx->dc;
-
-	return (dc->hwss.optimize_timing_for_fsft &&
-		dc->hwss.optimize_timing_for_fsft(dc, &pStream->timing, max_input_rate_in_khz));
-}
-#endif
 
 /*
  * dc_stream_set_cursor_attributes() - Update cursor attributes and set cursor surface address
@@ -336,17 +316,12 @@ bool dc_stream_set_cursor_attributes(
 
 	/* SubVP is not compatible with HW cursor larger than 64 x 64 x 4.
 	 * Therefore, if cursor is greater than 64 x 64 x 4, fallback to SW cursor in the following case:
-	 * 1. For single display cases, if resolution is >= 5K and refresh rate < 120hz
-	 * 2. For multi display cases, if resolution is >= 4K and refresh rate < 120hz
-	 *
-	 * [< 120hz is a requirement for SubVP configs]
+	 * 1. If the config is a candidate for SubVP high refresh (both single an dual display configs)
+	 * 2. If not subvp high refresh, for single display cases, if resolution is >= 5K and refresh rate < 120hz
+	 * 3. If not subvp high refresh, for multi display cases, if resolution is >= 4K and refresh rate < 120hz
 	 */
 	if (dc->debug.allow_sw_cursor_fallback && attributes->height * attributes->width * 4 > 16384) {
-		if (dc->current_state->stream_count == 1 && stream->timing.v_addressable >= 2880 &&
-				((stream->timing.pix_clk_100hz * 100) / stream->timing.v_total / stream->timing.h_total) < 120)
-			return false;
-		else if (dc->current_state->stream_count > 1 && stream->timing.v_addressable >= 2160 &&
-				((stream->timing.pix_clk_100hz * 100) / stream->timing.v_total / stream->timing.h_total) < 120)
+		if (check_subvp_sw_cursor_fallback_req(dc, stream))
 			return false;
 	}
 
@@ -398,8 +373,8 @@ static void program_cursor_position(
 		}
 
 		dc->hwss.set_cursor_position(pipe_ctx);
-
-		dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
+		if (dc->ctx->dmub_srv)
+			dc_send_update_cursor_info_to_dmu(pipe_ctx, i);
 	}
 
 	if (pipe_to_program)
@@ -492,25 +467,6 @@ bool dc_stream_add_writeback(struct dc *dc,
 		struct dwbc *dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
 		dwb->otg_inst = stream_status->primary_otg_inst;
 	}
-	if (IS_DIAG_DC(dc->ctx->dce_environment)) {
-		if (!dc->hwss.update_bandwidth(dc, dc->current_state)) {
-			dm_error("DC: update_bandwidth failed!\n");
-			return false;
-		}
-
-		/* enable writeback */
-		if (dc->hwss.enable_writeback) {
-			struct dwbc *dwb = dc->res_pool->dwbc[wb_info->dwb_pipe_inst];
-
-			if (dwb->funcs->is_enabled(dwb)) {
-				/* writeback pipe already enabled, only need to update */
-				dc->hwss.update_writeback(dc, wb_info, dc->current_state);
-			} else {
-				/* Enable writeback pipe from scratch*/
-				dc->hwss.enable_writeback(dc, wb_info, dc->current_state);
-			}
-		}
-	}
 	return true;
 }
 
@@ -555,17 +511,6 @@ bool dc_stream_remove_writeback(struct dc *dc,
 	}
 	stream->num_wb_info = j;
 
-	if (IS_DIAG_DC(dc->ctx->dce_environment)) {
-		/* recalculate and apply DML parameters */
-		if (!dc->hwss.update_bandwidth(dc, dc->current_state)) {
-			dm_error("DC: update_bandwidth failed!\n");
-			return false;
-		}
-
-		/* disable writeback */
-		if (dc->hwss.disable_writeback)
-			dc->hwss.disable_writeback(dc, dwb_pipe_inst);
-	}
 	return true;
 }
 
@@ -724,7 +669,6 @@ bool dc_stream_set_dynamic_metadata(struct dc *dc,
 	return true;
 }
 
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 enum dc_status dc_stream_add_dsc_to_resource(struct dc *dc,
 		struct dc_state *state,
 		struct dc_stream_state *stream)
@@ -735,7 +679,6 @@ enum dc_status dc_stream_add_dsc_to_resource(struct dc *dc,
 		return DC_NO_DSC_RESOURCE;
 	}
 }
-#endif
 
 struct pipe_ctx *dc_stream_get_pipe_ctx(struct dc_stream_state *stream)
 {

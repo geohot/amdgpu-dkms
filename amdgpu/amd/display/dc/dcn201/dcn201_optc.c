@@ -55,10 +55,9 @@ static void optc201_triplebuffer_lock(struct timing_generator *optc)
 	REG_SET(OTG_MASTER_UPDATE_LOCK, 0,
 		OTG_MASTER_UPDATE_LOCK, 1);
 
-	if (optc->ctx->dce_environment != DCE_ENV_FPGA_MAXIMUS)
-		REG_WAIT(OTG_MASTER_UPDATE_LOCK,
-				UPDATE_LOCK_STATUS, 1,
-				1, 10);
+	REG_WAIT(OTG_MASTER_UPDATE_LOCK,
+			UPDATE_LOCK_STATUS, 1,
+			1, 10);
 }
 
 static void optc201_triplebuffer_unlock(struct timing_generator *optc)
@@ -179,9 +178,7 @@ static struct timing_generator_funcs dcn201_tg_funcs = {
 		.clear_optc_underflow = optc1_clear_optc_underflow,
 		.get_crc = optc1_get_crc,
 		.configure_crc = optc2_configure_crc,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 		.set_dsc_config = optc2_set_dsc_config,
-#endif
 		.set_dwb_source = NULL,
 		.get_optc_source = optc201_get_optc_source,
 		.set_vtg_params = optc1_set_vtg_params,

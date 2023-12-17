@@ -41,13 +41,13 @@
 #include "kfd_priv.h"
 #include "kfd_device_queue_manager.h"
 #include "kfd_svm.h"
-#include "kfd_debug.h"
 #include "kfd_ipc.h"
 #include "kfd_trace.h"
 
 #include "amdgpu_amdkfd.h"
 #include "kfd_smi_events.h"
 #include "amdgpu_dma_buf.h"
+#include "kfd_debug.h"
 
 static long kfd_ioctl(struct file *, unsigned int, unsigned long);
 static int kfd_open(struct inode *, struct file *);
@@ -97,7 +97,7 @@ int kfd_chardev_init(void)
 	if (err < 0)
 		goto err_register_chrdev;
 
-	kfd_class = class_create(THIS_MODULE, kfd_dev_name);
+	kfd_class = kcl_class_create(THIS_MODULE, kfd_dev_name);
 	err = PTR_ERR(kfd_class);
 	if (IS_ERR(kfd_class))
 		goto err_class_create;
@@ -155,13 +155,6 @@ static int kfd_open(struct inode *inode, struct file *filep)
 		return -EFAULT;
 	}
 
-	if (kfd_is_locked()) {
-		dev_dbg(kfd_device, "kfd is locked!\n"
-				"process %d unreferenced", process->pasid);
-		kfd_unref_process(process);
-		return -EAGAIN;
-	}
-
 	/* filep now owns the reference returned by kfd_create_process */
 	filep->private_data = process;
 
@@ -195,7 +188,12 @@ static int kfd_ioctl_get_version(struct file *filep, struct kfd_process *p,
 static int set_queue_properties_from_user(struct queue_properties *q_properties,
 				struct kfd_ioctl_create_queue_args *args)
 {
-	if (args->queue_percentage > KFD_MAX_QUEUE_PERCENTAGE) {
+	/*
+	 * Repurpose queue percentage to accommodate new features:
+	 * bit 0-7: queue percentage
+	 * bit 8-15: pm4_target_xcc
+	 */
+	if ((args->queue_percentage & 0xFF) > KFD_MAX_QUEUE_PERCENTAGE) {
 		pr_err("Queue percentage must be between 0 to KFD_MAX_QUEUE_PERCENTAGE\n");
 		return -EINVAL;
 	}
@@ -245,7 +243,9 @@ static int set_queue_properties_from_user(struct queue_properties *q_properties,
 
 	q_properties->is_interop = false;
 	q_properties->is_gws = false;
-	q_properties->queue_percent = args->queue_percentage;
+	q_properties->queue_percent = args->queue_percentage & 0xFF;
+	/* bit 8-15 are repurposed to be PM4 target XCC */
+	q_properties->pm4_target_xcc = (args->queue_percentage >> 8) & 0xFF;
 	q_properties->priority = args->queue_priority;
 	q_properties->queue_address = args->ring_base_address;
 	q_properties->queue_size = args->ring_size;
@@ -302,7 +302,7 @@ static int kfd_ioctl_create_queue(struct file *filep, struct kfd_process *p,
 					void *data)
 {
 	struct kfd_ioctl_create_queue_args *args = data;
-	struct kfd_dev *dev;
+	struct kfd_node *dev;
 	int err = 0;
 	unsigned int queue_id;
 	struct kfd_process_device *pdd;
@@ -336,16 +336,18 @@ static int kfd_ioctl_create_queue(struct file *filep, struct kfd_process *p,
 		goto err_bind_process;
 	}
 
-	if (!pdd->doorbell_index &&
-	    kfd_alloc_process_doorbells(dev, &pdd->doorbell_index) < 0) {
-		err = -ENOMEM;
-		goto err_alloc_doorbells;
+	if (!pdd->qpd.proc_doorbells) {
+		err = kfd_alloc_process_doorbells(dev->kfd, pdd);
+		if (err) {
+			pr_debug("failed to allocate process doorbells\n");
+			goto err_bind_process;
+		}
 	}
 
 	/* Starting with GFX11, wptr BOs must be mapped to GART for MES to determine work
 	 * on unmapped queues for usermode queue oversubscription (no aggregated doorbell)
 	 */
-	if (dev->shared_resources.enable_mes &&
+	if (dev->kfd->shared_resources.enable_mes &&
 			((dev->adev->mes.sched_version & AMDGPU_MES_API_VERSION_MASK)
 			>> AMDGPU_MES_API_VERSION_SHIFT) >= 2) {
 		struct amdgpu_bo_va_mapping *wptr_mapping;
@@ -420,7 +422,6 @@ err_create_queue:
 	if (wptr_bo)
 		amdgpu_amdkfd_free_gtt_mem(dev->adev, wptr_bo);
 err_wptr_map_gart:
-err_alloc_doorbells:
 err_bind_process:
 err_pdd:
 	mutex_unlock(&p->mutex);
@@ -452,7 +453,12 @@ static int kfd_ioctl_update_queue(struct file *filp, struct kfd_process *p,
 	struct kfd_ioctl_update_queue_args *args = data;
 	struct queue_properties properties;
 
-	if (args->queue_percentage > KFD_MAX_QUEUE_PERCENTAGE) {
+	/*
+	 * Repurpose queue percentage to accommodate new features:
+	 * bit 0-7: queue percentage
+	 * bit 8-15: pm4_target_xcc
+	 */
+	if ((args->queue_percentage & 0xFF) > KFD_MAX_QUEUE_PERCENTAGE) {
 		pr_err("Queue percentage must be between 0 to KFD_MAX_QUEUE_PERCENTAGE\n");
 		return -EINVAL;
 	}
@@ -476,7 +482,9 @@ static int kfd_ioctl_update_queue(struct file *filp, struct kfd_process *p,
 
 	properties.queue_address = args->ring_base_address;
 	properties.queue_size = args->ring_size;
-	properties.queue_percent = args->queue_percentage;
+	properties.queue_percent = args->queue_percentage & 0xFF;
+	/* bit 8-15 are repurposed to be PM4 target XCC */
+	properties.pm4_target_xcc = (args->queue_percentage >> 8) & 0xFF;
 	properties.priority = args->queue_priority;
 
 	pr_debug("Updating queue id %d for pasid 0x%x\n",
@@ -895,7 +903,7 @@ static int kfd_ioctl_set_scratch_backing_va(struct file *filep,
 {
 	struct kfd_ioctl_set_scratch_backing_va_args *args = data;
 	struct kfd_process_device *pdd;
-	struct kfd_dev *dev;
+	struct kfd_node *dev;
 	long err;
 
 	mutex_lock(&p->mutex);
@@ -1014,19 +1022,23 @@ err_drm_file:
 	return ret;
 }
 
-bool kfd_dev_is_large_bar(struct kfd_dev *dev)
+bool kfd_dev_is_large_bar(struct kfd_node *dev)
 {
-	if (debug_largebar) {
+	if (dev->kfd->adev->debug_largebar) {
 		pr_debug("Simulate large-bar allocation on non large-bar machine\n");
 		return true;
 	}
 
-	if (dev->use_iommu_v2)
-		return false;
-
 	if (dev->local_mem_info.local_mem_size_private == 0 &&
-			dev->local_mem_info.local_mem_size_public > 0)
+	    dev->local_mem_info.local_mem_size_public > 0)
 		return true;
+
+	if (dev->local_mem_info.local_mem_size_public == 0 &&
+	    dev->kfd->adev->gmc.is_app_apu) {
+		pr_debug("APP APU, Consider like a large bar system\n");
+		return true;
+	}
+
 	return false;
 }
 
@@ -1038,7 +1050,8 @@ static int kfd_ioctl_get_available_memory(struct file *filep,
 
 	if (!pdd)
 		return -EINVAL;
-	args->available = amdgpu_amdkfd_get_available_memory(pdd->dev->adev);
+	args->available = amdgpu_amdkfd_get_available_memory(pdd->dev->adev,
+							pdd->dev->node_id);
 	kfd_unlock_pdd(pdd);
 	return 0;
 }
@@ -1049,7 +1062,7 @@ static int kfd_ioctl_alloc_memory_of_gpu(struct file *filep,
 	struct kfd_ioctl_alloc_memory_of_gpu_args *args = data;
 	struct kfd_process_device *pdd;
 	void *mem;
-	struct kfd_dev *dev;
+	struct kfd_node *dev;
 	int idr_handle;
 	long err;
 	uint64_t offset = args->mmap_offset;
@@ -1076,6 +1089,20 @@ static int kfd_ioctl_alloc_memory_of_gpu(struct file *filep,
 		mutex_unlock(&p->svms.lock);
 		return -EADDRINUSE;
 	}
+
+	/* When register user buffer check if it has been registered by svm by
+	 * buffer cpu virtual address.
+	 */
+	if ((flags & KFD_IOC_ALLOC_MEM_FLAGS_USERPTR) &&
+	    interval_tree_iter_first(&p->svms.objects,
+				     args->mmap_offset >> PAGE_SHIFT,
+				     (args->mmap_offset  + args->size - 1) >> PAGE_SHIFT)) {
+		pr_err("User Buffer Address: 0x%llx already allocated by SVM\n",
+			args->mmap_offset);
+		mutex_unlock(&p->svms.lock);
+		return -EADDRINUSE;
+	}
+
 	mutex_unlock(&p->svms.lock);
 #endif
 	mutex_lock(&p->mutex);
@@ -1133,7 +1160,7 @@ static int kfd_ioctl_alloc_memory_of_gpu(struct file *filep,
 			cpuva = offset;
 		}
 	} else if (flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) {
-		if (args->size != kfd_doorbell_process_slice(dev)) {
+		if (args->size != kfd_doorbell_process_slice(dev->kfd)) {
 			err = -EINVAL;
 			goto err_unlock;
 		}
@@ -1265,7 +1292,7 @@ static int kfd_ioctl_map_memory_to_gpu(struct file *filep,
 	struct kfd_ioctl_map_memory_to_gpu_args *args = data;
 	struct kfd_process_device *pdd, *peer_pdd;
 	void *mem;
-	struct kfd_dev *dev;
+	struct kfd_node *dev;
 	long err = 0;
 	int i;
 	uint32_t *devices_arr = NULL;
@@ -1348,13 +1375,13 @@ static int kfd_ioctl_map_memory_to_gpu(struct file *filep,
 		args->n_success = i+1;
 	}
 
-	mutex_unlock(&p->mutex);
-
 	err = amdgpu_amdkfd_gpuvm_sync_memory(dev->adev, (struct kgd_mem *) mem, true);
 	if (err) {
 		pr_debug("Sync memory failed, wait interrupted by user signal\n");
 		goto sync_memory_failed;
 	}
+
+	mutex_unlock(&p->mutex);
 
 	/* Flush TLBs after waiting for the page table updates to complete */
 	for (i = 0; i < args->n_devices; i++) {
@@ -1373,9 +1400,9 @@ get_process_device_data_failed:
 bind_process_to_device_failed:
 get_mem_obj_from_handle_failed:
 map_memory_to_gpu_failed:
+sync_memory_failed:
 	mutex_unlock(&p->mutex);
 copy_from_user_failed:
-sync_memory_failed:
 	kfree(devices_arr);
 	trace_kfd_map_memory_to_gpu_end(p,
 		args->n_devices * sizeof(*devices_arr), "Failed");
@@ -1391,6 +1418,7 @@ static int kfd_ioctl_unmap_memory_from_gpu(struct file *filep,
 	void *mem;
 	long err = 0;
 	uint32_t *devices_arr = NULL, i;
+	bool flush_tlb;
 
 	if (!args->n_devices) {
 		pr_debug("Device IDs array empty\n");
@@ -1443,33 +1471,40 @@ static int kfd_ioctl_unmap_memory_from_gpu(struct file *filep,
 		}
 		args->n_success = i+1;
 	}
-	mutex_unlock(&p->mutex);
 
-	if (kfd_flush_tlb_after_unmap(pdd->dev)) {
+	flush_tlb = kfd_flush_tlb_after_unmap(pdd->dev->kfd);
+	if (flush_tlb) {
 		err = amdgpu_amdkfd_gpuvm_sync_memory(pdd->dev->adev,
 				(struct kgd_mem *) mem, true);
 		if (err) {
 			pr_debug("Sync memory failed, wait interrupted by user signal\n");
 			goto sync_memory_failed;
 		}
-
-		/* Flush TLBs after waiting for the page table updates to complete */
-		for (i = 0; i < args->n_devices; i++) {
-			peer_pdd = kfd_process_device_data_by_id(p, devices_arr[i]);
-			if (WARN_ON_ONCE(!peer_pdd))
-				continue;
-			kfd_flush_tlb(peer_pdd, TLB_FLUSH_HEAVYWEIGHT);
-		}
 	}
+
+	/* Flush TLBs after waiting for the page table updates to complete */
+	for (i = 0; i < args->n_devices; i++) {
+		peer_pdd = kfd_process_device_data_by_id(p, devices_arr[i]);
+		if (WARN_ON_ONCE(!peer_pdd))
+			continue;
+		if (flush_tlb)
+			kfd_flush_tlb(peer_pdd, TLB_FLUSH_HEAVYWEIGHT);
+
+		/* Remove dma mapping after tlb flush to avoid IO_PAGE_FAULT */
+		amdgpu_amdkfd_gpuvm_dmaunmap_mem(mem, peer_pdd->drm_priv);
+	}
+
+	mutex_unlock(&p->mutex);
+
 	kfree(devices_arr);
 	return 0;
 
 bind_process_to_device_failed:
 get_mem_obj_from_handle_failed:
 unmap_memory_from_gpu_failed:
+sync_memory_failed:
 	mutex_unlock(&p->mutex);
 copy_from_user_failed:
-sync_memory_failed:
 	kfree(devices_arr);
 	return err;
 }
@@ -1480,7 +1515,7 @@ static int kfd_ioctl_alloc_queue_gws(struct file *filep,
 	int retval;
 	struct kfd_ioctl_alloc_queue_gws_args *args = data;
 	struct queue *q;
-	struct kfd_dev *dev;
+	struct kfd_node *dev;
 
 	mutex_lock(&p->mutex);
 	q = pqm_get_user_queue(&p->pqm, args->queue_id);
@@ -1502,7 +1537,8 @@ static int kfd_ioctl_alloc_queue_gws(struct file *filep,
 		goto out_unlock;
 	}
 
-	if (dev->gws_debug_workaround && p->debug_trap_enabled) {
+	if (p->debug_trap_enabled && (!kfd_dbg_has_gws_support(dev) ||
+				      kfd_dbg_has_cwsr_workaround(dev))) {
 		retval = -EBUSY;
 		goto out_unlock;
 	}
@@ -1522,10 +1558,11 @@ static int kfd_ioctl_get_dmabuf_info(struct file *filep,
 		struct kfd_process *p, void *data)
 {
 	struct kfd_ioctl_get_dmabuf_info_args *args = data;
-	struct kfd_dev *dev = NULL;
+	struct kfd_node *dev = NULL;
 	struct amdgpu_device *dmabuf_adev;
 	void *metadata_buffer = NULL;
 	uint32_t flags;
+	int8_t xcp_id;
 	unsigned int i;
 	int r;
 
@@ -1546,17 +1583,14 @@ static int kfd_ioctl_get_dmabuf_info(struct file *filep,
 	r = amdgpu_amdkfd_get_dmabuf_info(dev->adev, args->dmabuf_fd,
 					  &dmabuf_adev, &args->size,
 					  metadata_buffer, args->metadata_size,
-					  &args->metadata_size, &flags);
+					  &args->metadata_size, &flags, &xcp_id);
 	if (r)
 		goto exit;
 
-	/* Reverse-lookup gpu_id from kgd pointer */
-	dev = kfd_device_by_adev(dmabuf_adev);
-	if (!dev) {
-		r = -EINVAL;
-		goto exit;
-	}
-	args->gpu_id = dev->id;
+	if (xcp_id >= 0)
+		args->gpu_id = dmabuf_adev->kfd.dev->nodes[xcp_id]->id;
+	else
+		args->gpu_id = dmabuf_adev->kfd.dev->nodes[0]->id;
 	args->flags = flags;
 
 	/* Copy metadata buffer to user mode */
@@ -1639,317 +1673,64 @@ static int kfd_ioctl_ipc_import_handle(struct file *filep,
 	return r;
 }
 
-static int kfd_ioctl_dbg_set_debug_trap(struct file *filep,
+static int kfd_ioctl_export_dmabuf(struct file *filep,
+				   struct kfd_process *p, void *data)
+{
+	struct kfd_ioctl_export_dmabuf_args *args = data;
+	struct kfd_process_device *pdd;
+	struct dma_buf *dmabuf;
+	struct kfd_node *dev;
+	void *mem;
+	int ret = 0;
+
+	dev = kfd_device_by_id(GET_GPU_ID(args->handle));
+	if (!dev)
+		return -EINVAL;
+
+	mutex_lock(&p->mutex);
+
+	pdd = kfd_get_process_device_data(dev, p);
+	if (!pdd) {
+		ret = -EINVAL;
+		goto err_unlock;
+	}
+
+	mem = kfd_process_device_translate_handle(pdd,
+						GET_IDR_HANDLE(args->handle));
+	if (!mem) {
+		ret = -EINVAL;
+		goto err_unlock;
+	}
+
+	ret = amdgpu_amdkfd_gpuvm_export_dmabuf(mem, &dmabuf);
+	mutex_unlock(&p->mutex);
+	if (ret)
+		goto err_out;
+
+	ret = dma_buf_fd(dmabuf, args->flags);
+	if (ret < 0) {
+		dma_buf_put(dmabuf);
+		goto err_out;
+	}
+	/* dma_buf_fd assigns the reference count to the fd, no need to
+	 * put the reference here.
+	 */
+	args->dmabuf_fd = ret;
+
+	return 0;
+
+err_unlock:
+	mutex_unlock(&p->mutex);
+err_out:
+	return ret;
+}
+
+/* Place holder for deprecated DBG API  */
+static int kfd_ioctl_dbg_set_debug_trap_deprecated(struct file *filep,
 				struct kfd_process *p, void *data)
 {
-	struct kfd_ioctl_dbg_trap_args *args = data;
-	struct task_struct *thread = NULL;
-	int r = 0, i;
-	struct kfd_process *target = NULL;
-	struct kfd_process_device *pdd = NULL;
-	struct pid *pid = NULL;
-	uint32_t *user_array = NULL;
-	uint32_t debug_trap_action;
-	uint64_t exception_mask;
-	uint32_t data1, data2, data3, data4;
-	bool check_devices;
-	bool need_user_array;
-	uint32_t size_to_copy_to_user_array = 0;
-	bool is_detach, is_attach;
-	bool need_proc_create = false;
-
-	debug_trap_action = args->op;
-	data1 = args->data1;
-	data2 = args->data2;
-	data3 = args->data3;
-	data4 = args->data4;
-	exception_mask = args->exception_mask;
-
-	if (sched_policy == KFD_SCHED_POLICY_NO_HWS) {
-		pr_err("Unsupported sched_policy: %i", sched_policy);
-		r = -EINVAL;
-		goto out;
-	}
-
-	is_detach = debug_trap_action == KFD_IOC_DBG_TRAP_ENABLE && data1 == 0;
-	is_attach = debug_trap_action == KFD_IOC_DBG_TRAP_ENABLE && data1 == 1;
-
-	check_devices =
-		debug_trap_action != KFD_IOC_DBG_TRAP_NODE_SUSPEND &&
-		debug_trap_action != KFD_IOC_DBG_TRAP_NODE_RESUME &&
-		debug_trap_action != KFD_IOC_DBG_TRAP_GET_QUEUE_SNAPSHOT &&
-		debug_trap_action != KFD_IOC_DBG_TRAP_DEVICE_SNAPSHOT &&
-		debug_trap_action != KFD_IOC_DBG_TRAP_GET_VERSION;
-
-	need_user_array =
-		debug_trap_action == KFD_IOC_DBG_TRAP_NODE_SUSPEND ||
-		debug_trap_action == KFD_IOC_DBG_TRAP_NODE_RESUME;
-
-	pid = find_get_pid(args->pid);
-	if (!pid) {
-		pr_debug("Cannot find pid info for %i\n",
-				args->pid);
-		r =  -ESRCH;
-		goto out;
-	}
-
-	thread = get_pid_task(pid, PIDTYPE_PID);
-
-	rcu_read_lock();
-	need_proc_create = is_attach && thread && thread != current &&
-					ptrace_parent(thread) == current;
-	rcu_read_unlock();
-
-	target = need_proc_create ?
-		kfd_create_process(thread) : kfd_lookup_process_by_pid(pid);
-	if (!target) {
-		pr_debug("Cannot find process info for %i\n",
-				args->pid);
-		r = -ESRCH;
-		goto out;
-	}
-
-	if (target != p && !is_detach) {
-		bool is_debugger_attached = false;
-
-		rcu_read_lock();
-		if (ptrace_parent(target->lead_thread) == current)
-			is_debugger_attached = true;
-		rcu_read_unlock();
-
-		if (!is_debugger_attached) {
-			pr_err("Cannot debug process\n");
-			r = -EPERM;
-			goto out;
-		}
-	}
-
-	mutex_lock(&target->mutex);
-
-	if (need_user_array) {
-		/* data 1 has the number of IDs */
-		size_t user_array_size = sizeof(uint32_t) * data1;
-
-		user_array = kzalloc(user_array_size, GFP_KERNEL);
-		if (!user_array) {
-			r = -ENOMEM;
-			goto unlock_out;
-		}
-		/* We need to copy the queue IDs from userspace */
-		if (copy_from_user(user_array,
-					(uint32_t *) args->ptr,
-					user_array_size)) {
-			r = -EFAULT;
-			goto unlock_out;
-		}
-	}
-
-	if (!is_attach &&
-			debug_trap_action != KFD_IOC_DBG_TRAP_GET_VERSION &&
-			debug_trap_action != KFD_IOC_DBG_TRAP_RUNTIME_ENABLE &&
-			!target->debug_trap_enabled) {
-		pr_err("Debugging is not enabled for this process\n");
-		r = -EINVAL;
-		goto unlock_out;
-	}
-
-	if (target->runtime_info.runtime_state != DEBUG_RUNTIME_STATE_ENABLED &&
-			(debug_trap_action == KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_OVERRIDE ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_MODE ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_NODE_SUSPEND ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_NODE_RESUME ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH ||
-			 debug_trap_action == KFD_IOC_DBG_TRAP_SET_PRECISE_MEM_OPS)) {
-		r = -EACCES;
-		goto unlock_out;
-	}
-
-	if (check_devices) {
-		for (i = 0; i < target->n_pdds; i++) {
-			struct kfd_process_device *pdd = target->pdds[i];
-
-			if (!KFD_IS_SOC15(pdd->dev)) {
-				r = -ENODEV;
-				goto unlock_out;
-			}
-
-			if (pdd->dev->gws_debug_workaround &&
-							pdd->qpd.num_gws) {
-				r = -EBUSY;
-				goto unlock_out;
-			}
-		}
-	}
-
-	if (debug_trap_action == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ||
-			debug_trap_action == KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH) {
-		uint32_t device_id = debug_trap_action == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ?
-							data4 : data2;
-		int user_gpu_id = kfd_process_get_user_gpu_id(target, device_id);
-
-		pdd = kfd_process_device_data_by_id(target, user_gpu_id);
-		if (user_gpu_id == -EINVAL || !pdd) {
-			r = -ENODEV;
-			goto unlock_out;
-		}
-	}
-
-	switch (debug_trap_action) {
-	case KFD_IOC_DBG_TRAP_ENABLE:
-		switch (data1) {
-		case 0:
-			r = kfd_dbg_trap_disable(target);
-			break;
-		case 1:
-			if (target != p)
-				target->debugger_process = p;
-			r = kfd_dbg_trap_enable(target, args->data2,
-						(void __user *) args->ptr,
-						&args->data3);
-			if (!r)
-				target->exception_enable_mask = exception_mask;
-			break;
-		default:
-			pr_err("Invalid trap enable option: %i\n",
-					data1);
-			r = -EINVAL;
-		}
-		break;
-
-	case KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_OVERRIDE:
-		r = kfd_dbg_trap_set_wave_launch_override(
-				target,
-				data1,
-				data2,
-				data3,
-				&args->data2,
-				&args->data3);
-		break;
-
-	case KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_MODE:
-		r = kfd_dbg_trap_set_wave_launch_mode(target,
-						data1);
-		break;
-
-	case KFD_IOC_DBG_TRAP_NODE_SUSPEND:
-		r = suspend_queues(target,
-				data1, /* Number of queues */
-				data2, /* Grace Period */
-				exception_mask, /* Clear mask */
-				user_array); /* array of queue ids */
-
-		size_to_copy_to_user_array = data1;
-
-		break;
-
-	case KFD_IOC_DBG_TRAP_NODE_RESUME:
-		r = resume_queues(target,
-				false,
-				data1, /* Number of queues */
-				user_array); /* array of queue ids */
-
-		size_to_copy_to_user_array = data1;
-
-		break;
-	case KFD_IOC_DBG_TRAP_QUERY_DEBUG_EVENT:
-		r = kfd_dbg_ev_query_debug_event(target,
-				/* data1 = 0 (process) or gpu_id or queue_id */
-				&args->data1,
-				&args->data2,
-				exception_mask, /* Clear mask */
-				&args->exception_mask /* Status mask */);
-		break;
-	case KFD_IOC_DBG_TRAP_GET_QUEUE_SNAPSHOT:
-		r = pqm_get_queue_snapshot(&target->pqm,
-					   exception_mask, /* Clear mask  */
-					   (void __user *)args->ptr,
-					   args->data1,
-					   &args->data2);
-
-		args->data1 = r < 0 ? 0 : r;
-		if (r > 0)
-			r = 0;
-		break;
-	case KFD_IOC_DBG_TRAP_GET_VERSION:
-		args->data1 = KFD_IOCTL_DBG_MAJOR_VERSION;
-		args->data2 = KFD_IOCTL_DBG_MINOR_VERSION;
-		break;
-	case KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH:
-		r = kfd_dbg_trap_clear_dev_address_watch(pdd, data1);
-		break;
-	case KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH:
-		r = kfd_dbg_trap_set_dev_address_watch(pdd,
-				args->ptr, /* watch address */
-				data3,     /* watch address mask */
-				&data1,    /* watch id */
-				data2);    /* watch mode */
-		if (r)
-			goto unlock_out;
-
-		/* Save the watch point ID for the caller */
-		args->data1 = data1;
-		break;
-	case KFD_IOC_DBG_TRAP_SET_PRECISE_MEM_OPS:
-		r = kfd_dbg_trap_set_precise_mem_ops(target, data1);
-		break;
-	case KFD_IOC_DBG_TRAP_QUERY_EXCEPTION_INFO:
-		r = kfd_dbg_trap_query_exception_info(target,
-				data1,
-				data2,
-				data3 == 1,
-				(void __user *) args->ptr, /* info */
-				&args->data4);      /* info size */
-		break;
-	case KFD_IOC_DBG_TRAP_DEVICE_SNAPSHOT:
-		r = kfd_dbg_trap_device_snapshot(target,
-				exception_mask,
-				(void __user *) args->ptr,
-				&args->data1,
-				&args->data2);
-		break;
-	case KFD_IOC_DBG_TRAP_RUNTIME_ENABLE:
-		if (data1)
-			r = kfd_dbg_runtime_enable(target,
-				args->ptr,
-				data2);
-		else
-			r = kfd_dbg_runtime_disable(target);
-		break;
-	case KFD_IOC_DBG_TRAP_SEND_RUNTIME_EVENT:
-		r = kfd_dbg_send_exception_to_runtime(target,
-						data1,
-						data2,
-						exception_mask);
-		break;
-	case KFD_IOC_DBG_TRAP_SET_EXCEPTIONS_ENABLED:
-		kfd_dbg_set_enabled_debug_exception_mask(target, exception_mask);
-		break;
-	default:
-		pr_err("Invalid option: %i\n", debug_trap_action);
-		r = -EINVAL;
-	}
-
-unlock_out:
-	mutex_unlock(&target->mutex);
-
-out:
-	if (user_array && size_to_copy_to_user_array) {
-		/* Copy the user array to userspace even on error. */
-		if (copy_to_user((void __user *)args->ptr, user_array,
-				sizeof(uint32_t) * size_to_copy_to_user_array))
-			pr_err("copy_to_user failed\n");
-	}
-
-	if (thread)
-		put_task_struct(thread);
-	if (pid)
-		put_pid(pid);
-
-	if (target)
-		kfd_unref_process(target);
-	kfree(user_array);
-	return r;
+	dev_dbg(kfd_device, "AMDKFD_IOC_DBG_TRAP is deprecated.\n");
+	return -EINVAL;
 }
 
 /* Place holder for deprecated CMA API */
@@ -2145,26 +1926,21 @@ static uint32_t get_process_num_bos(struct kfd_process *p)
 		idr_for_each_entry(&pdd->alloc_idr, buf_obj, id) {
 			struct kgd_mem *kgd_mem = (struct kgd_mem *)buf_obj->mem;
 
-			if ((uint64_t)kgd_mem->va > pdd->gpuvm_base)
+			if (!kgd_mem->va || kgd_mem->va > pdd->gpuvm_base)
 				num_of_bos++;
 		}
 	}
 	return num_of_bos;
 }
 
-static int criu_get_prime_handle(struct drm_gem_object *gobj, int flags,
+static int criu_get_prime_handle(struct kgd_mem *mem, int flags,
 				      u32 *shared_fd)
 {
 	struct dma_buf *dmabuf;
 	int ret;
 
-#ifdef HAVE_DRM_DRV_GEM_PRIME_EXPORT_PI
-	dmabuf = amdgpu_gem_prime_export(gobj, flags);
-#else
-	dmabuf = amdgpu_gem_prime_export(gobj->dev, gobj, flags);
-#endif
-	if (IS_ERR(dmabuf)) {
-		ret = PTR_ERR(dmabuf);
+	ret = amdgpu_amdkfd_gpuvm_export_dmabuf(mem, &dmabuf);
+	if (ret) {
 		pr_err("dmabuf export failed for the BO\n");
 		return ret;
 	}
@@ -2222,7 +1998,11 @@ static int criu_checkpoint_bos(struct kfd_process *p,
 			kgd_mem = (struct kgd_mem *)buf_obj->mem;
 			dumper_bo = kgd_mem->bo;
 
-			if ((uint64_t)kgd_mem->va <= pdd->gpuvm_base)
+			/* Skip checkpointing BOs that are used for Trap handler
+			 * code and state. Currently, these BOs have a VA that
+			 * is less GPUVM Base
+			 */
+			if (kgd_mem->va && kgd_mem->va <= pdd->gpuvm_base)
 				continue;
 
 			bo_bucket = &bo_buckets[bo_index];
@@ -2244,7 +2024,7 @@ static int criu_checkpoint_bos(struct kfd_process *p,
 			}
 			if (bo_bucket->alloc_flags
 			    & (KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)) {
-				ret = criu_get_prime_handle(&dumper_bo->tbo.base,
+				ret = criu_get_prime_handle(kgd_mem,
 						bo_bucket->alloc_flags &
 						KFD_IOC_ALLOC_MEM_FLAGS_WRITABLE ? DRM_RDWR : 0,
 						&bo_bucket->dmabuf_fd);
@@ -2515,7 +2295,7 @@ static int criu_restore_devices(struct kfd_process *p,
 	}
 
 	for (i = 0; i < args->num_devices; i++) {
-		struct kfd_dev *dev;
+		struct kfd_node *dev;
 		struct kfd_process_device *pdd;
 		struct file *drm_file;
 
@@ -2576,10 +2356,10 @@ static int criu_restore_devices(struct kfd_process *p,
 			goto exit;
 		}
 
-		if (!pdd->doorbell_index &&
-		    kfd_alloc_process_doorbells(pdd->dev, &pdd->doorbell_index) < 0) {
-			ret = -ENOMEM;
-			goto exit;
+		if (!pdd->qpd.proc_doorbells) {
+			ret = kfd_alloc_process_doorbells(dev->kfd, pdd);
+			if (ret)
+				goto exit;
 		}
 	}
 
@@ -2600,7 +2380,7 @@ static int criu_restore_memory_of_gpu_ipc(struct kfd_process_device *pdd,
 					  struct kgd_mem **kgd_mem)
 {
 	uint64_t alloc_handle = MAKE_HANDLE(pdd->user_gpu_id, bo_priv->idr_handle);
-	struct kfd_dev *dev = pdd->dev;
+	struct kfd_node *dev = pdd->dev;
 	struct kfd_bo *kfd_bo;
 	int ret, idr_handle;
 	uint64_t offset;
@@ -2693,7 +2473,8 @@ static int criu_restore_memory_of_gpu(struct kfd_process_device *pdd,
 	u64 offset;
 
 	if (bo_bucket->alloc_flags & KFD_IOC_ALLOC_MEM_FLAGS_DOORBELL) {
-		if (bo_bucket->size != kfd_doorbell_process_slice(pdd->dev))
+		if (bo_bucket->size !=
+				kfd_doorbell_process_slice(pdd->dev->kfd))
 			return -EINVAL;
 
 		offset = kfd_get_process_doorbells(pdd);
@@ -2790,7 +2571,7 @@ static int criu_restore_bo(struct kfd_process *p,
 
 	/* now map these BOs to GPU/s */
 	for (j = 0; j < p->n_pdds; j++) {
-		struct kfd_dev *peer;
+		struct kfd_node *peer;
 		struct kfd_process_device *peer_pdd;
 
 		if (!bo_priv->mapped_gpuids[j])
@@ -2818,7 +2599,7 @@ static int criu_restore_bo(struct kfd_process *p,
 	/* create the dmabuf object and export the bo */
 	if (bo_bucket->alloc_flags
 	    & (KFD_IOC_ALLOC_MEM_FLAGS_VRAM | KFD_IOC_ALLOC_MEM_FLAGS_GTT)) {
-		ret = criu_get_prime_handle(&kgd_mem->bo->tbo.base, DRM_RDWR,
+		ret = criu_get_prime_handle(kgd_mem, DRM_RDWR,
 					    &bo_bucket->dmabuf_fd);
 		if (ret)
 			return ret;
@@ -3155,6 +2936,367 @@ static int kfd_ioctl_criu(struct file *filep, struct kfd_process *p, void *data)
 	return ret;
 }
 
+static int runtime_enable(struct kfd_process *p, uint64_t r_debug,
+			bool enable_ttmp_setup)
+{
+	int i = 0, ret = 0;
+
+	if (p->is_runtime_retry)
+		goto retry;
+
+	if (p->runtime_info.runtime_state != DEBUG_RUNTIME_STATE_DISABLED)
+		return -EBUSY;
+
+	for (i = 0; i < p->n_pdds; i++) {
+		struct kfd_process_device *pdd = p->pdds[i];
+
+		if (pdd->qpd.queue_count)
+			return -EEXIST;
+
+		/*
+		 * Setup TTMPs by default.
+		 * Note that this call must remain here for MES ADD QUEUE to
+		 * skip_process_ctx_clear unconditionally as the first call to
+		 * SET_SHADER_DEBUGGER clears any stale process context data
+		 * saved in MES.
+		 */
+		if (pdd->dev->kfd->shared_resources.enable_mes)
+			kfd_dbg_set_mes_debug_mode(pdd, !kfd_dbg_has_cwsr_workaround(pdd->dev));
+	}
+
+	p->runtime_info.runtime_state = DEBUG_RUNTIME_STATE_ENABLED;
+	p->runtime_info.r_debug = r_debug;
+	p->runtime_info.ttmp_setup = enable_ttmp_setup;
+
+	if (p->runtime_info.ttmp_setup) {
+		for (i = 0; i < p->n_pdds; i++) {
+			struct kfd_process_device *pdd = p->pdds[i];
+
+			if (!kfd_dbg_is_rlc_restore_supported(pdd->dev)) {
+				amdgpu_gfx_off_ctrl(pdd->dev->adev, false);
+				pdd->dev->kfd2kgd->enable_debug_trap(
+						pdd->dev->adev,
+						true,
+						pdd->dev->vm_info.last_vmid_kfd);
+			} else if (kfd_dbg_is_per_vmid_supported(pdd->dev)) {
+				pdd->spi_dbg_override = pdd->dev->kfd2kgd->enable_debug_trap(
+						pdd->dev->adev,
+						false,
+						0);
+			}
+		}
+	}
+
+retry:
+	if (p->debug_trap_enabled) {
+		if (!p->is_runtime_retry) {
+			kfd_dbg_trap_activate(p);
+			kfd_dbg_ev_raise(KFD_EC_MASK(EC_PROCESS_RUNTIME),
+					p, NULL, 0, false, NULL, 0);
+		}
+
+		mutex_unlock(&p->mutex);
+		ret = down_interruptible(&p->runtime_enable_sema);
+		mutex_lock(&p->mutex);
+
+		p->is_runtime_retry = !!ret;
+	}
+
+	return ret;
+}
+
+static int runtime_disable(struct kfd_process *p)
+{
+	int i = 0, ret;
+	bool was_enabled = p->runtime_info.runtime_state == DEBUG_RUNTIME_STATE_ENABLED;
+
+	p->runtime_info.runtime_state = DEBUG_RUNTIME_STATE_DISABLED;
+	p->runtime_info.r_debug = 0;
+
+	if (p->debug_trap_enabled) {
+		if (was_enabled)
+			kfd_dbg_trap_deactivate(p, false, 0);
+
+		if (!p->is_runtime_retry)
+			kfd_dbg_ev_raise(KFD_EC_MASK(EC_PROCESS_RUNTIME),
+					p, NULL, 0, false, NULL, 0);
+
+		mutex_unlock(&p->mutex);
+		ret = down_interruptible(&p->runtime_enable_sema);
+		mutex_lock(&p->mutex);
+
+		p->is_runtime_retry = !!ret;
+		if (ret)
+			return ret;
+	}
+
+	if (was_enabled && p->runtime_info.ttmp_setup) {
+		for (i = 0; i < p->n_pdds; i++) {
+			struct kfd_process_device *pdd = p->pdds[i];
+
+			if (!kfd_dbg_is_rlc_restore_supported(pdd->dev))
+				amdgpu_gfx_off_ctrl(pdd->dev->adev, true);
+		}
+	}
+
+	p->runtime_info.ttmp_setup = false;
+
+	/* disable ttmp setup */
+	for (i = 0; i < p->n_pdds; i++) {
+		struct kfd_process_device *pdd = p->pdds[i];
+
+		if (kfd_dbg_is_per_vmid_supported(pdd->dev)) {
+			pdd->spi_dbg_override =
+					pdd->dev->kfd2kgd->disable_debug_trap(
+					pdd->dev->adev,
+					false,
+					pdd->dev->vm_info.last_vmid_kfd);
+
+			if (!pdd->dev->kfd->shared_resources.enable_mes)
+				debug_refresh_runlist(pdd->dev->dqm);
+			else
+				kfd_dbg_set_mes_debug_mode(pdd,
+							   !kfd_dbg_has_cwsr_workaround(pdd->dev));
+		}
+	}
+
+	return 0;
+}
+
+static int kfd_ioctl_runtime_enable(struct file *filep, struct kfd_process *p, void *data)
+{
+	struct kfd_ioctl_runtime_enable_args *args = data;
+	int r;
+
+	mutex_lock(&p->mutex);
+
+	if (args->mode_mask & KFD_RUNTIME_ENABLE_MODE_ENABLE_MASK)
+		r = runtime_enable(p, args->r_debug,
+				!!(args->mode_mask & KFD_RUNTIME_ENABLE_MODE_TTMP_SAVE_MASK));
+	else
+		r = runtime_disable(p);
+
+	mutex_unlock(&p->mutex);
+
+	return r;
+}
+
+static int kfd_ioctl_set_debug_trap(struct file *filep, struct kfd_process *p, void *data)
+{
+	struct kfd_ioctl_dbg_trap_args *args = data;
+	struct task_struct *thread = NULL;
+	struct mm_struct *mm = NULL;
+	struct pid *pid = NULL;
+	struct kfd_process *target = NULL;
+	struct kfd_process_device *pdd = NULL;
+	int r = 0;
+
+	if (sched_policy == KFD_SCHED_POLICY_NO_HWS) {
+		pr_err("Debugging does not support sched_policy %i", sched_policy);
+		return -EINVAL;
+	}
+
+	pid = find_get_pid(args->pid);
+	if (!pid) {
+		pr_debug("Cannot find pid info for %i\n", args->pid);
+		r = -ESRCH;
+		goto out;
+	}
+
+	thread = get_pid_task(pid, PIDTYPE_PID);
+	if (!thread) {
+		r = -ESRCH;
+		goto out;
+	}
+
+	mm = get_task_mm(thread);
+	if (!mm) {
+		r = -ESRCH;
+		goto out;
+	}
+
+	if (args->op == KFD_IOC_DBG_TRAP_ENABLE) {
+		bool create_process;
+
+		rcu_read_lock();
+		create_process = thread && thread != current && ptrace_parent(thread) == current;
+		rcu_read_unlock();
+
+		target = create_process ? kfd_create_process(thread) :
+					kfd_lookup_process_by_pid(pid);
+	} else {
+		target = kfd_lookup_process_by_pid(pid);
+	}
+
+	if (IS_ERR_OR_NULL(target)) {
+		pr_debug("Cannot find process PID %i to debug\n", args->pid);
+		r = target ? PTR_ERR(target) : -ESRCH;
+		goto out;
+	}
+
+	/* Check if target is still PTRACED. */
+	rcu_read_lock();
+	if (target != p && args->op != KFD_IOC_DBG_TRAP_DISABLE
+				&& ptrace_parent(target->lead_thread) != current) {
+		pr_err("PID %i is not PTRACED and cannot be debugged\n", args->pid);
+		r = -EPERM;
+	}
+	rcu_read_unlock();
+
+	if (r)
+		goto out;
+
+	mutex_lock(&target->mutex);
+
+	if (args->op != KFD_IOC_DBG_TRAP_ENABLE && !target->debug_trap_enabled) {
+		pr_err("PID %i not debug enabled for op %i\n", args->pid, args->op);
+		r = -EINVAL;
+		goto unlock_out;
+	}
+
+	if (target->runtime_info.runtime_state != DEBUG_RUNTIME_STATE_ENABLED &&
+			(args->op == KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_OVERRIDE ||
+			 args->op == KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_MODE ||
+			 args->op == KFD_IOC_DBG_TRAP_SUSPEND_QUEUES ||
+			 args->op == KFD_IOC_DBG_TRAP_RESUME_QUEUES ||
+			 args->op == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ||
+			 args->op == KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH ||
+			 args->op == KFD_IOC_DBG_TRAP_SET_FLAGS)) {
+		r = -EPERM;
+		goto unlock_out;
+	}
+
+	if (args->op == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ||
+	    args->op == KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH) {
+		int user_gpu_id = kfd_process_get_user_gpu_id(target,
+				args->op == KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH ?
+					args->set_node_address_watch.gpu_id :
+					args->clear_node_address_watch.gpu_id);
+
+		pdd = kfd_process_device_data_by_id(target, user_gpu_id);
+		if (user_gpu_id == -EINVAL || !pdd) {
+			r = -ENODEV;
+			goto unlock_out;
+		}
+	}
+
+	switch (args->op) {
+	case KFD_IOC_DBG_TRAP_ENABLE:
+		if (target != p)
+			target->debugger_process = p;
+
+		r = kfd_dbg_trap_enable(target,
+					args->enable.dbg_fd,
+					(void __user *)args->enable.rinfo_ptr,
+					&args->enable.rinfo_size);
+		if (!r)
+			target->exception_enable_mask = args->enable.exception_mask;
+
+		break;
+	case KFD_IOC_DBG_TRAP_DISABLE:
+		r = kfd_dbg_trap_disable(target);
+		break;
+	case KFD_IOC_DBG_TRAP_SEND_RUNTIME_EVENT:
+		r = kfd_dbg_send_exception_to_runtime(target,
+				args->send_runtime_event.gpu_id,
+				args->send_runtime_event.queue_id,
+				args->send_runtime_event.exception_mask);
+		break;
+	case KFD_IOC_DBG_TRAP_SET_EXCEPTIONS_ENABLED:
+		kfd_dbg_set_enabled_debug_exception_mask(target,
+				args->set_exceptions_enabled.exception_mask);
+		break;
+	case KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_OVERRIDE:
+		r = kfd_dbg_trap_set_wave_launch_override(target,
+				args->launch_override.override_mode,
+				args->launch_override.enable_mask,
+				args->launch_override.support_request_mask,
+				&args->launch_override.enable_mask,
+				&args->launch_override.support_request_mask);
+		break;
+	case KFD_IOC_DBG_TRAP_SET_WAVE_LAUNCH_MODE:
+		r = kfd_dbg_trap_set_wave_launch_mode(target,
+				args->launch_mode.launch_mode);
+		break;
+	case KFD_IOC_DBG_TRAP_SUSPEND_QUEUES:
+		r = suspend_queues(target,
+				args->suspend_queues.num_queues,
+				args->suspend_queues.grace_period,
+				args->suspend_queues.exception_mask,
+				(uint32_t *)args->suspend_queues.queue_array_ptr);
+
+		break;
+	case KFD_IOC_DBG_TRAP_RESUME_QUEUES:
+		r = resume_queues(target, args->resume_queues.num_queues,
+				(uint32_t *)args->resume_queues.queue_array_ptr);
+		break;
+	case KFD_IOC_DBG_TRAP_SET_NODE_ADDRESS_WATCH:
+		r = kfd_dbg_trap_set_dev_address_watch(pdd,
+				args->set_node_address_watch.address,
+				args->set_node_address_watch.mask,
+				&args->set_node_address_watch.id,
+				args->set_node_address_watch.mode);
+		break;
+	case KFD_IOC_DBG_TRAP_CLEAR_NODE_ADDRESS_WATCH:
+		r = kfd_dbg_trap_clear_dev_address_watch(pdd,
+				args->clear_node_address_watch.id);
+		break;
+	case KFD_IOC_DBG_TRAP_SET_FLAGS:
+		r = kfd_dbg_trap_set_flags(target, &args->set_flags.flags);
+		break;
+	case KFD_IOC_DBG_TRAP_QUERY_DEBUG_EVENT:
+		r = kfd_dbg_ev_query_debug_event(target,
+				&args->query_debug_event.queue_id,
+				&args->query_debug_event.gpu_id,
+				args->query_debug_event.exception_mask,
+				&args->query_debug_event.exception_mask);
+		break;
+	case KFD_IOC_DBG_TRAP_QUERY_EXCEPTION_INFO:
+		r = kfd_dbg_trap_query_exception_info(target,
+				args->query_exception_info.source_id,
+				args->query_exception_info.exception_code,
+				args->query_exception_info.clear_exception,
+				(void __user *)args->query_exception_info.info_ptr,
+				&args->query_exception_info.info_size);
+		break;
+	case KFD_IOC_DBG_TRAP_GET_QUEUE_SNAPSHOT:
+		r = pqm_get_queue_snapshot(&target->pqm,
+				args->queue_snapshot.exception_mask,
+				(void __user *)args->queue_snapshot.snapshot_buf_ptr,
+				&args->queue_snapshot.num_queues,
+				&args->queue_snapshot.entry_size);
+		break;
+	case KFD_IOC_DBG_TRAP_GET_DEVICE_SNAPSHOT:
+		r = kfd_dbg_trap_device_snapshot(target,
+				args->device_snapshot.exception_mask,
+				(void __user *)args->device_snapshot.snapshot_buf_ptr,
+				&args->device_snapshot.num_devices,
+				&args->device_snapshot.entry_size);
+		break;
+	default:
+		pr_err("Invalid option: %i\n", args->op);
+		r = -EINVAL;
+	}
+
+unlock_out:
+	mutex_unlock(&target->mutex);
+
+out:
+	if (thread)
+		put_task_struct(thread);
+
+	if (mm)
+		mmput(mm);
+
+	if (pid)
+		put_pid(pid);
+
+	if (target)
+		kfd_unref_process(target);
+
+	return r;
+}
+
 #define AMDKFD_IOCTL_DEF(ioctl, _func, _flags) \
 	[_IOC_NR(ioctl)] = {.cmd = ioctl, .func = _func, .flags = _flags, \
 			    .cmd_drv = 0, .name = #ioctl}
@@ -3265,14 +3407,23 @@ static const struct amdkfd_ioctl_desc amdkfd_ioctls[] = {
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_AVAILABLE_MEMORY,
 			kfd_ioctl_get_available_memory, 0),
 
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_EXPORT_DMABUF,
+				kfd_ioctl_export_dmabuf, 0),
+
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_RUNTIME_ENABLE,
+			kfd_ioctl_runtime_enable, 0),
+
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_DBG_TRAP,
+			kfd_ioctl_set_debug_trap, 0),
+
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_IPC_IMPORT_HANDLE,
 				kfd_ioctl_ipc_import_handle, 0),
 
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_IPC_EXPORT_HANDLE,
 				kfd_ioctl_ipc_export_handle, 0),
 
-	AMDKFD_IOCTL_DEF(AMDKFD_IOC_DBG_TRAP,
-			kfd_ioctl_dbg_set_debug_trap, 0),
+	AMDKFD_IOCTL_DEF(AMDKFD_IOC_DBG_TRAP_DEPRECATED,
+			kfd_ioctl_dbg_set_debug_trap_deprecated, 0),
 
 	AMDKFD_IOCTL_DEF(AMDKFD_IOC_RLC_SPM,
 			kfd_ioctl_rlc_spm, 0),
@@ -3395,7 +3546,7 @@ err_i1:
 	return retcode;
 }
 
-static int kfd_mmio_mmap(struct kfd_dev *dev, struct kfd_process *process,
+static int kfd_mmio_mmap(struct kfd_node *dev, struct kfd_process *process,
 		      struct vm_area_struct *vma)
 {
 	phys_addr_t address;
@@ -3405,8 +3556,8 @@ static int kfd_mmio_mmap(struct kfd_dev *dev, struct kfd_process *process,
 
 	address = dev->adev->rmmio_remap.bus_addr;
 
-	vma->vm_flags |= VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_NORESERVE |
-				VM_DONTDUMP | VM_PFNMAP;
+	vm_flags_set(vma, VM_IO | VM_DONTCOPY | VM_DONTEXPAND | VM_NORESERVE |
+				VM_DONTDUMP | VM_PFNMAP);
 
 	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
 
@@ -3429,7 +3580,7 @@ static int kfd_mmio_mmap(struct kfd_dev *dev, struct kfd_process *process,
 static int kfd_mmap(struct file *filp, struct vm_area_struct *vma)
 {
 	struct kfd_process *process;
-	struct kfd_dev *dev = NULL;
+	struct kfd_node *dev = NULL;
 	unsigned long mmap_offset;
 	unsigned int gpu_id;
 

@@ -37,6 +37,7 @@
 #include "amdgpu_dma_buf.h"
 #include "amdgpu_xgmi.h"
 #include <drm/amdgpu_drm.h>
+#include <drm/ttm/ttm_tt.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-fence-array.h>
 #include <linux/pci-p2pdma.h>
@@ -147,9 +148,6 @@ err_fences_put:
  * 0 on success or a negative error code on failure.
  */
 static int amdgpu_dma_buf_map_attach(struct dma_buf *dma_buf,
-#ifndef HAVE_DRM_GEM_MAP_ATTACH_2ARGS
-					struct device *target_dev,
-#endif
 					struct dma_buf_attachment *attach)
 {
 	struct drm_gem_object *obj = dma_buf->priv;
@@ -157,11 +155,8 @@ static int amdgpu_dma_buf_map_attach(struct dma_buf *dma_buf,
 	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->tbo.bdev);
 	long r;
 
-#ifdef HAVE_DRM_GEM_MAP_ATTACH_2ARGS
 	r = drm_gem_map_attach(dma_buf, attach);
-#else
-	r = drm_gem_map_attach(dma_buf, target_dev, attach);
-#endif
+
 	if (r)
 		return r;
 
@@ -337,7 +332,7 @@ static struct sg_table *amdgpu_dma_buf_map(struct dma_buf_attachment *attach,
 	if (!bo->tbo.pin_count) {
 		/* move buffer into GTT or VRAM */
 		struct ttm_operation_ctx ctx = { false, false };
-		unsigned domains = AMDGPU_GEM_DOMAIN_GTT;
+		unsigned int domains = AMDGPU_GEM_DOMAIN_GTT;
 
 #ifdef HAVE_STRUCT_DMA_BUF_ATTACH_OPS_ALLOW_PEER2PEER
 		if (bo->preferred_domains & AMDGPU_GEM_DOMAIN_VRAM &&
@@ -682,12 +677,13 @@ amdgpu_dma_buf_create_obj(struct drm_device *dev, struct dma_buf *dma_buf)
 
 		flags |= other->flags & (AMDGPU_GEM_CREATE_CPU_GTT_USWC |
 					 AMDGPU_GEM_CREATE_COHERENT |
+					 AMDGPU_GEM_CREATE_EXT_COHERENT |
 					 AMDGPU_GEM_CREATE_UNCACHED);
 	}
 
 	ret = amdgpu_gem_object_create(adev, dma_buf->size, PAGE_SIZE,
 				       AMDGPU_GEM_DOMAIN_CPU, flags,
-				       ttm_bo_type_sg, resv, &gobj);
+				       ttm_bo_type_sg, resv, &gobj, 0);
 	if (ret)
 		goto error;
 

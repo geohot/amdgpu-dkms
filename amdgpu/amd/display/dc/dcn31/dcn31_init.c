@@ -23,8 +23,8 @@
  *
  */
 
-#include "dce110/dce110_hw_sequencer.h"
-#include "dcn10/dcn10_hw_sequencer.h"
+#include "dce110/dce110_hwseq.h"
+#include "dcn10/dcn10_hwseq.h"
 #include "dcn20/dcn20_hwseq.h"
 #include "dcn21/dcn21_hwseq.h"
 #include "dcn30/dcn30_hwseq.h"
@@ -34,7 +34,7 @@
 #include "dcn31_init.h"
 
 static const struct hw_sequencer_funcs dcn31_funcs = {
-	.program_gamut_remap = dcn10_program_gamut_remap,
+	.program_gamut_remap = dcn30_program_gamut_remap,
 	.init_hw = dcn31_init_hw,
 	.power_down_on_boot = dcn10_power_down_on_boot,
 	.apply_ctx_to_hw = dce110_apply_ctx_to_hw,
@@ -58,6 +58,7 @@ static const struct hw_sequencer_funcs dcn31_funcs = {
 	.enable_audio_stream = dce110_enable_audio_stream,
 	.disable_audio_stream = dce110_disable_audio_stream,
 	.disable_plane = dcn20_disable_plane,
+	.disable_pixel_data = dcn20_disable_pixel_data,
 	.pipe_control_lock = dcn20_pipe_control_lock,
 	.interdependent_update_lock = dcn10_lock_all_pipes,
 	.cursor_lock = dcn10_cursor_lock,
@@ -66,7 +67,7 @@ static const struct hw_sequencer_funcs dcn31_funcs = {
 	.update_bandwidth = dcn20_update_bandwidth,
 	.set_drr = dcn10_set_drr,
 	.get_position = dcn10_get_position,
-	.set_static_screen_control = dcn10_set_static_screen_control,
+	.set_static_screen_control = dcn30_set_static_screen_control,
 	.setup_stereo = dcn10_setup_stereo,
 	.set_avmute = dcn30_set_avmute,
 	.log_hw_state = dcn10_log_hw_state,
@@ -109,7 +110,7 @@ static const struct hw_sequencer_funcs dcn31_funcs = {
 	.set_disp_pattern_generator = dcn30_set_disp_pattern_generator,
 	.optimize_pwr_state = dcn21_optimize_pwr_state,
 	.exit_optimized_pwr_state = dcn21_exit_optimized_pwr_state,
-	.update_visual_confirm_color = dcn20_update_visual_confirm_color,
+	.update_visual_confirm_color = dcn10_update_visual_confirm_color,
 };
 
 static const struct hwseq_private_funcs dcn31_private_funcs = {
@@ -138,9 +139,7 @@ static const struct hwseq_private_funcs dcn31_private_funcs = {
 	.hubp_pg_control = dcn31_hubp_pg_control,
 	.program_all_writeback_pipes_in_tree = dcn30_program_all_writeback_pipes_in_tree,
 	.update_odm = dcn20_update_odm,
-#ifdef CONFIG_DRM_AMD_DC_DSC_SUPPORT
 	.dsc_pg_control = dcn31_dsc_pg_control,
-#endif
 	.set_hdr_multiplier = dcn10_set_hdr_multiplier,
 	.verify_allow_pstate_change_high = dcn10_verify_allow_pstate_change_high,
 	.wait_for_blank_complete = dcn20_wait_for_blank_complete,
@@ -155,8 +154,4 @@ void dcn31_hw_sequencer_construct(struct dc *dc)
 	dc->hwss = dcn31_funcs;
 	dc->hwseq->funcs = dcn31_private_funcs;
 
-	if (IS_FPGA_MAXIMUS_DC(dc->ctx->dce_environment)) {
-		dc->hwss.init_hw = dcn20_fpga_init_hw;
-		dc->hwseq->funcs.init_pipes = NULL;
-	}
 }

@@ -53,6 +53,7 @@
 
 #include <drm/drm_print.h>
 #include <drm/drm_gem.h>
+#include <drm/drm_syncobj.h>
 #include <drm/gpu_scheduler.h>
 #include <drm/spsc_queue.h>
 
@@ -61,6 +62,55 @@
 
 #define to_drm_sched_job(sched_job)		\
 		container_of((sched_job), struct drm_sched_job, queue_node)
+
+int drm_sched_policy = DRM_SCHED_POLICY_FIFO;
+
+/**
+ * DOC: sched_policy (int)
+ * Used to override default entities scheduling policy in a run queue.
+ */
+MODULE_PARM_DESC(sched_policy, "Specify the scheduling policy for entities on a run-queue, " __stringify(DRM_SCHED_POLICY_RR) " = Round Robin, " __stringify(DRM_SCHED_POLICY_FIFO) " = FIFO (default).");
+module_param_named(sched_policy, drm_sched_policy, int, 0444);
+
+static __always_inline bool drm_sched_entity_compare_before(struct rb_node *a,
+							    const struct rb_node *b)
+{
+	struct drm_sched_entity *ent_a =  rb_entry((a), struct drm_sched_entity, rb_tree_node);
+	struct drm_sched_entity *ent_b =  rb_entry((b), struct drm_sched_entity, rb_tree_node);
+
+	return ktime_before(ent_a->oldest_job_waiting, ent_b->oldest_job_waiting);
+}
+
+static inline void drm_sched_rq_remove_fifo_locked(struct drm_sched_entity *entity)
+{
+	struct drm_sched_rq *rq = entity->rq;
+
+	if (!RB_EMPTY_NODE(&entity->rb_tree_node)) {
+		rb_erase_cached(&entity->rb_tree_node, &rq->rb_tree_root);
+		RB_CLEAR_NODE(&entity->rb_tree_node);
+	}
+}
+
+void drm_sched_rq_update_fifo(struct drm_sched_entity *entity, ktime_t ts)
+{
+	/*
+	 * Both locks need to be grabbed, one to protect from entity->rq change
+	 * for entity from within concurrent drm_sched_entity_select_rq and the
+	 * other to update the rb tree structure.
+	 */
+	spin_lock(&entity->rq_lock);
+	spin_lock(&entity->rq->lock);
+
+	drm_sched_rq_remove_fifo_locked(entity);
+
+	entity->oldest_job_waiting = ts;
+
+	rb_add_cached(&entity->rb_tree_node, &entity->rq->rb_tree_root,
+		      drm_sched_entity_compare_before);
+
+	spin_unlock(&entity->rq->lock);
+	spin_unlock(&entity->rq_lock);
+}
 
 /**
  * drm_sched_rq_init - initialize a given run queue struct
@@ -75,6 +125,7 @@ static void drm_sched_rq_init(struct drm_gpu_scheduler *sched,
 {
 	spin_lock_init(&rq->lock);
 	INIT_LIST_HEAD(&rq->entities);
+	rq->rb_tree_root = RB_ROOT_CACHED;
 	rq->current_entity = NULL;
 	rq->sched = sched;
 }
@@ -92,9 +143,12 @@ void drm_sched_rq_add_entity(struct drm_sched_rq *rq,
 {
 	if (!list_empty(&entity->list))
 		return;
+
 	spin_lock(&rq->lock);
+
 	atomic_inc(rq->sched->score);
 	list_add_tail(&entity->list, &rq->entities);
+
 	spin_unlock(&rq->lock);
 }
 
@@ -111,23 +165,30 @@ void drm_sched_rq_remove_entity(struct drm_sched_rq *rq,
 {
 	if (list_empty(&entity->list))
 		return;
+
 	spin_lock(&rq->lock);
+
 	atomic_dec(rq->sched->score);
 	list_del_init(&entity->list);
+
 	if (rq->current_entity == entity)
 		rq->current_entity = NULL;
+
+	if (drm_sched_policy == DRM_SCHED_POLICY_FIFO)
+		drm_sched_rq_remove_fifo_locked(entity);
+
 	spin_unlock(&rq->lock);
 }
 
 /**
- * drm_sched_rq_select_entity - Select an entity which could provide a job to run
+ * drm_sched_rq_select_entity_rr - Select an entity which could provide a job to run
  *
  * @rq: scheduler run queue to check.
  *
  * Try to find a ready entity, returns NULL if none found.
  */
 static struct drm_sched_entity *
-drm_sched_rq_select_entity(struct drm_sched_rq *rq)
+drm_sched_rq_select_entity_rr(struct drm_sched_rq *rq)
 {
 	struct drm_sched_entity *entity;
 
@@ -164,12 +225,40 @@ drm_sched_rq_select_entity(struct drm_sched_rq *rq)
 }
 
 /**
+ * drm_sched_rq_select_entity_fifo - Select an entity which provides a job to run
+ *
+ * @rq: scheduler run queue to check.
+ *
+ * Find oldest waiting ready entity, returns NULL if none found.
+ */
+static struct drm_sched_entity *
+drm_sched_rq_select_entity_fifo(struct drm_sched_rq *rq)
+{
+	struct rb_node *rb;
+
+	spin_lock(&rq->lock);
+	for (rb = rb_first_cached(&rq->rb_tree_root); rb; rb = rb_next(rb)) {
+		struct drm_sched_entity *entity;
+
+		entity = rb_entry(rb, struct drm_sched_entity, rb_tree_node);
+		if (drm_sched_entity_is_ready(entity)) {
+			rq->current_entity = entity;
+			reinit_completion(&entity->entity_idle);
+			break;
+		}
+	}
+	spin_unlock(&rq->lock);
+
+	return rb ? rb_entry(rb, struct drm_sched_entity, rb_tree_node) : NULL;
+}
+
+/**
  * drm_sched_job_done - complete a job
  * @s_job: pointer to the job which is done
  *
  * Finish the job's fence and wake up the worker thread.
  */
-static void drm_sched_job_done(struct drm_sched_job *s_job)
+static void drm_sched_job_done(struct drm_sched_job *s_job, int result)
 {
 	struct drm_sched_fence *s_fence = s_job->s_fence;
 	struct drm_gpu_scheduler *sched = s_fence->sched;
@@ -180,7 +269,7 @@ static void drm_sched_job_done(struct drm_sched_job *s_job)
 	trace_drm_sched_process_job(s_fence);
 
 	dma_fence_get(&s_fence->finished);
-	drm_sched_fence_finished(s_fence);
+	drm_sched_fence_finished(s_fence, result);
 	dma_fence_put(&s_fence->finished);
 	wake_up_interruptible(&sched->wake_up_worker);
 }
@@ -194,34 +283,8 @@ static void drm_sched_job_done_cb(struct dma_fence *f, struct dma_fence_cb *cb)
 {
 	struct drm_sched_job *s_job = container_of(cb, struct drm_sched_job, cb);
 
-	drm_sched_job_done(s_job);
+	drm_sched_job_done(s_job, f->error);
 }
-
-/**
- * drm_sched_dependency_optimized - test if the dependency can be optimized
- *
- * @fence: the dependency fence
- * @entity: the entity which depends on the above fence
- *
- * Returns true if the dependency can be optimized and false otherwise
- */
-bool drm_sched_dependency_optimized(struct dma_fence* fence,
-				    struct drm_sched_entity *entity)
-{
-	struct drm_gpu_scheduler *sched = entity->rq->sched;
-	struct drm_sched_fence *s_fence;
-
-	if (!fence || dma_fence_is_signaled(fence))
-		return false;
-	if (fence->context == entity->fence_context)
-		return true;
-	s_fence = to_drm_sched_fence(fence);
-	if (s_fence && s_fence->sched == sched)
-		return true;
-
-	return false;
-}
-EXPORT_SYMBOL(drm_sched_dependency_optimized);
 
 /**
  * drm_sched_start_timeout - start timeout for reset worker
@@ -246,7 +309,8 @@ static void drm_sched_start_timeout(struct drm_gpu_scheduler *sched)
  */
 void drm_sched_fault(struct drm_gpu_scheduler *sched)
 {
-	mod_delayed_work(sched->timeout_wq, &sched->work_tdr, 0);
+	if (sched->timeout_wq)
+		mod_delayed_work(sched->timeout_wq, &sched->work_tdr, 0);
 }
 EXPORT_SYMBOL(drm_sched_fault);
 
@@ -470,12 +534,12 @@ void drm_sched_start(struct drm_gpu_scheduler *sched, bool full_recovery)
 			r = dma_fence_add_callback(fence, &s_job->cb,
 						   drm_sched_job_done_cb);
 			if (r == -ENOENT)
-				drm_sched_job_done(s_job);
+				drm_sched_job_done(s_job, fence->error);
 			else if (r)
 				DRM_DEV_ERROR(sched->dev, "fence add callback failed (%d)\n",
 					  r);
 		} else
-			drm_sched_job_done(s_job);
+			drm_sched_job_done(s_job, 0);
 	}
 
 	if (full_recovery) {
@@ -489,10 +553,21 @@ void drm_sched_start(struct drm_gpu_scheduler *sched, bool full_recovery)
 EXPORT_SYMBOL(drm_sched_start);
 
 /**
- * drm_sched_resubmit_jobs - helper to relaunch jobs from the pending list
+ * drm_sched_resubmit_jobs - Deprecated, don't use in new code!
  *
  * @sched: scheduler instance
  *
+ * Re-submitting jobs was a concept AMD came up as cheap way to implement
+ * recovery after a job timeout.
+ *
+ * This turned out to be not working very well. First of all there are many
+ * problem with the dma_fence implementation and requirements. Either the
+ * implementation is risking deadlocks with core memory management or violating
+ * documented implementation details of the dma_fence object.
+ *
+ * Drivers can still save and restore their state for recovery operations, but
+ * we shouldn't make this a general scheduler feature around the dma_fence
+ * interface.
  */
 void drm_sched_resubmit_jobs(struct drm_gpu_scheduler *sched)
 {
@@ -647,6 +722,69 @@ int drm_sched_job_add_dependency(struct drm_sched_job *job,
 }
 EXPORT_SYMBOL(drm_sched_job_add_dependency);
 
+/**
+ * drm_sched_job_add_syncobj_dependency - adds a syncobj's fence as a job dependency
+ * @job: scheduler job to add the dependencies to
+ * @file: drm file private pointer
+ * @handle: syncobj handle to lookup
+ * @point: timeline point
+ *
+ * This adds the fence matching the given syncobj to @job.
+ *
+ * Returns:
+ * 0 on success, or an error on failing to expand the array.
+ */
+int drm_sched_job_add_syncobj_dependency(struct drm_sched_job *job,
+					 struct drm_file *file,
+					 u32 handle,
+					 u32 point)
+{
+	struct dma_fence *fence;
+	int ret;
+
+	ret = drm_syncobj_find_fence(file, handle, point, 0, &fence);
+	if (ret)
+		return ret;
+
+	return drm_sched_job_add_dependency(job, fence);
+}
+EXPORT_SYMBOL(drm_sched_job_add_syncobj_dependency);
+
+/**
+ * drm_sched_job_add_resv_dependencies - add all fences from the resv to the job
+ * @job: scheduler job to add the dependencies to
+ * @resv: the dma_resv object to get the fences from
+ * @usage: the dma_resv_usage to use to filter the fences
+ *
+ * This adds all fences matching the given usage from @resv to @job.
+ * Must be called with the @resv lock held.
+ *
+ * Returns:
+ * 0 on success, or an error on failing to expand the array.
+ */
+int drm_sched_job_add_resv_dependencies(struct drm_sched_job *job,
+					struct dma_resv *resv,
+					enum dma_resv_usage usage)
+{
+	struct dma_resv_iter cursor;
+	struct dma_fence *fence;
+	int ret;
+
+	dma_resv_assert_held(resv);
+
+	dma_resv_for_each_fence(&cursor, resv, usage, fence) {
+		/* Make sure to grab an additional ref on the added fence */
+		dma_fence_get(fence);
+		ret = drm_sched_job_add_dependency(job, fence);
+		if (ret) {
+			dma_fence_put(fence);
+			return ret;
+		}
+	}
+	return 0;
+}
+EXPORT_SYMBOL(drm_sched_job_add_resv_dependencies);
+
 #ifdef HAVE_DRM_GEM_OBJECT_RESV
 /**
  * drm_sched_job_add_implicit_dependencies - adds implicit dependencies as job
@@ -667,23 +805,8 @@ int drm_sched_job_add_implicit_dependencies(struct drm_sched_job *job,
 					    struct drm_gem_object *obj,
 					    bool write)
 {
-	struct dma_resv_iter cursor;
-	struct dma_fence *fence;
-	int ret;
-
-	dma_resv_assert_held(obj->resv);
-
-	dma_resv_for_each_fence(&cursor, obj->resv, dma_resv_usage_rw(write),
-				fence) {
-		/* Make sure to grab an additional ref on the added fence */
-		dma_fence_get(fence);
-		ret = drm_sched_job_add_dependency(job, fence);
-		if (ret) {
-			dma_fence_put(fence);
-			return ret;
-		}
-	}
-	return 0;
+	return drm_sched_job_add_resv_dependencies(job, obj->resv,
+						   dma_resv_usage_rw(write));
 }
 EXPORT_SYMBOL(drm_sched_job_add_implicit_dependencies);
 #endif
@@ -771,7 +894,9 @@ drm_sched_select_entity(struct drm_gpu_scheduler *sched)
 
 	/* Kernel run queue has higher priority than normal run queue*/
 	for (i = DRM_SCHED_PRIORITY_COUNT - 1; i >= DRM_SCHED_PRIORITY_MIN; i--) {
-		entity = drm_sched_rq_select_entity(&sched->sched_rq[i]);
+		entity = drm_sched_policy == DRM_SCHED_POLICY_FIFO ?
+			drm_sched_rq_select_entity_fifo(&sched->sched_rq[i]) :
+			drm_sched_rq_select_entity_rr(&sched->sched_rq[i]);
 		if (entity)
 			break;
 	}
@@ -911,7 +1036,7 @@ static int drm_sched_main(void *param)
 		sched_job = drm_sched_entity_pop_job(entity);
 
 		if (!sched_job) {
-			complete(&entity->entity_idle);
+			complete_all(&entity->entity_idle);
 			continue;
 		}
 
@@ -922,26 +1047,28 @@ static int drm_sched_main(void *param)
 
 		trace_drm_run_job(sched_job, entity);
 		fence = sched->ops->run_job(sched_job);
-		complete(&entity->entity_idle);
+		complete_all(&entity->entity_idle);
 		drm_sched_fence_scheduled(s_fence);
 
 		if (!IS_ERR_OR_NULL(fence)) {
+#ifdef HAVE_DMA_FENCE_OPS_SET_DEADLINE
+			drm_sched_fence_set_parent(s_fence, fence);
+#else
 			s_fence->parent = dma_fence_get(fence);
+#endif
 			/* Drop for original kref_init of the fence */
 			dma_fence_put(fence);
 
 			r = dma_fence_add_callback(fence, &sched_job->cb,
 						   drm_sched_job_done_cb);
 			if (r == -ENOENT)
-				drm_sched_job_done(sched_job);
+				drm_sched_job_done(sched_job, fence->error);
 			else if (r)
 				DRM_DEV_ERROR(sched->dev, "fence add callback failed (%d)\n",
 					  r);
 		} else {
-			if (IS_ERR(fence))
-				dma_fence_set_error(&s_fence->finished, PTR_ERR(fence));
-
-			drm_sched_job_done(sched_job);
+			drm_sched_job_done(sched_job, IS_ERR(fence) ?
+					   PTR_ERR(fence) : 0);
 		}
 
 		wake_up(&sched->job_scheduled);
